@@ -2398,8 +2398,10 @@ def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list
                 ]
 
     # ── Previous runs: timeslip, weather, channel stats, changelog ────────────
+    # Build in chronological order (oldest first) so Run 1 = oldest
+    _other_runs = [s for s in reversed(all_saved_runs) if s["filename"] != csv_name]
     prev_runs = []
-    for saved in all_saved_runs:
+    for _run_idx, saved in enumerate(_other_runs, start=1):
         if saved["filename"] == csv_name:
             continue
         rec  = saved["record"]
@@ -2430,9 +2432,12 @@ def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list
                                        p_wx.get("pressure_hpa")))
         if _p_da is not None:
             _p_da = round(_p_da)
+        _run_date = s.get("date", "") or ""
+        _run_label = f"Run {_run_idx}" + (f" ({_run_date})" if _run_date else "")
         prev_runs.append({
+            "label":         _run_label,
             "filename":      saved["filename"],
-            "date":          s.get("date", ""),
+            "date":          _run_date,
             "track":         s.get("track_name", "") or s.get("track_location", ""),
             "timeslip": {
                 "reaction":  s.get("reaction_time"),
@@ -2528,6 +2533,10 @@ def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list
     return _json.dumps(payload, indent=2, default=str)
 
 _ai_system = """\
+IMPORTANT: This analysis is used by real drag racers as a crew chief tool. All facts, labels, and conclusions must be accurate. \
+Do not state something is missing when it is present in the data. Do not mislabel calculated values. \
+When in doubt, check the payload — the answer is in the data.
+
 You are a seasoned drag racing crew chief with 20+ years running supercharged bracket and heads-up cars. \
 You work with whatever data the driver has — timeslip splits, weather, RacePak channel data, changelog, and car specs. \
 Not every driver has a data acquisition system. If channel_stats and key_traces are empty, that means no RacePak data is available for this run — \
@@ -2545,14 +2554,15 @@ Walk every split: reaction, 60ft, 330ft, 660ft, 1000ft, ET, MPH. \
 Call out strong vs weak splits and what each means mechanically. \
 A soft 60ft with a fast mid-track means the car came on strong after the hit. \
 An ET gain without a corresponding MPH gain means the improvement came from the launch, not more power. \
-Cross-check the ET and MPH against car weight using the equation: HP ≈ (weight × (mph/234)³). \
+Cross-check the ET and MPH against car weight using the Hale formula: RWHP ≈ weight × (mph/234)³. \
+This formula produces rear-wheel horsepower (RWHP), not flywheel HP — always label this value as RWHP in your analysis, never as "flywheel HP" or "HP at the flywheel." \
 If gear ratios and rear end ratio are provided, validate driveshaft RPM against engine RPM at each gear using: \
   expected_DS_RPM = engine_RPM / (gear_ratio × rear_ratio). Flag if measured DS RPM diverges significantly.
 
 ## Cross-Run Comparison
-Compare this run against every previous run with specific delta numbers. \
-Correct for conditions using density altitude — a lower DA run will naturally be faster. \
-Only credit a genuine improvement if corrected ET improved. State DA for each run when comparing. \
+Compare this run against every previous run using raw ET, 60ft, and MPH — do not compute or reference corrected ET. \
+Note the DA for each run to give context (lower DA = better air = naturally faster). \
+Use the run label field (e.g. "Run 1", "Run 2") to identify each run — never use raw filenames or timestamps. \
 If no previous runs exist, say so and move on.
 
 ## Changelog Impact
@@ -2575,9 +2585,9 @@ Work through the RacePak data systematically:
 List anything that looks wrong or needs watching. For each: which channel, when in the run, what value, why it matters. If nothing is anomalous, say "No anomalies detected."
 
 ## Missing Specs
-If any car profile field is marked NOT SET, list them here and explain specifically what analysis was limited by the missing data \
-(e.g. "Rear gear ratio not set — could not validate driveshaft RPM against engine RPM"). \
-Prompt the user to fill in those fields in the Car Profile sidebar.
+Check the car_profile in the data payload for fields whose value contains "NOT SET". List ONLY those fields — do not \
+claim a field is missing if it has a value. If every field is populated, write: "All car profile fields are set — full analysis available." \
+Never state that a field is missing when its value was provided in the data.
 
 ## Next Run Recommendations
 Exactly 3 numbered recommendations. Each must state: what to change, the specific target value or direction, and the direct reason from this run's data. No generic advice.
@@ -2601,10 +2611,6 @@ FUEL TYPE — adjust all EGT interpretation and fuel flow expectations by fuel t
 
 WEATHER CORRECTION: Density altitude is pre-computed from actual temp/humidity/baro and included in the weather \
 block for every run — use it directly, do not say it is missing or estimated. \
-NHRA ET correction: correctedET = ET × (1 + 0.00000886 × DA_ft). This adjusts each run's ET to what it \
-would have been at sea level in standard conditions. Compare corrected ETs across runs — if corrected ET \
-improved, the car genuinely got faster. If corrected ET held flat but raw ET improved, credit the weather, not the tune. \
-State the raw ET, DA, and corrected ET for every run in cross-run comparison.
 
 BLOWER TYPE CONTEXT:
 - Roots blower: boost comes on hard at the hit, then tapers. Boost falloff at top end is normal.
@@ -2844,40 +2850,99 @@ if _has_car_profile:
 </div>""", unsafe_allow_html=True)
 
 with _pc2:
-    _tfl    = _rd_saved.get("tire_pressure_fl", 0)
-    _tfr    = _rd_saved.get("tire_pressure_fr", 0)
-    _trl    = _rd_saved.get("tire_pressure_rl", 0)
-    _trr    = _rd_saved.get("tire_pressure_rr", 0)
-    _tt     = _rd_saved.get("track_temp_f", 0)
-    _lrpm   = _rd_saved.get("launch_rpm", 0)
-    _rnotes = _rd_saved.get("notes", "")
-    _shift_pt = int(_rd_saved.get("shift_point", 0))
+    def _rd_row(label, val, fmt=None, unit="", highlight=False):
+        """Return an HTML table row, or '' if val is falsy/zero."""
+        if val is None or val == "" or val == 0 or val == 0.0:
+            return ""
+        display = fmt.format(val) if fmt else str(val)
+        if unit:
+            display = f"{display} {unit}"
+        color = "#cc1111" if highlight else "#eee"
+        fw = "font-weight:700;" if highlight else ""
+        return (f'<tr><td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">{label}</td>'
+                f'<td style="color:{color};{fw}text-align:right;">{display}</td></tr>')
 
-    _rd_rows = ""
+    def _rd_section(title, rows_html):
+        """Wrap a non-empty group of rows with a section header row."""
+        if not rows_html:
+            return ""
+        return (f'<tr><td colspan="2" style="color:#666;font-size:0.78rem;padding:6px 0 2px;'
+                f'letter-spacing:0.05em;text-transform:uppercase;border-top:1px solid #1e1e2a;">'
+                f'{title}</td></tr>' + rows_html)
+
+    _r = _rd_saved  # shorthand
+
+    # ── Tires ──
+    _tfl = _r.get("tire_pressure_fl", 0) or 0
+    _tfr = _r.get("tire_pressure_fr", 0) or 0
+    _trl = _r.get("tire_pressure_rl", 0) or 0
+    _trr = _r.get("tire_pressure_rr", 0) or 0
+    _tire_rows = ""
     if _tfl or _tfr:
-        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (F)</td>'
-                     f'<td style="color:#eee;text-align:right;">L {_tfl:.1f} · R {_tfr:.1f} psi</td></tr>')
+        _tire_rows += (f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Tire Press FL / FR</td>'
+                       f'<td style="color:#eee;text-align:right;">{_tfl:.1f} / {_tfr:.1f} psi</td></tr>')
     if _trl or _trr:
-        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (R)</td>'
-                     f'<td style="color:#eee;text-align:right;">L {_trl:.1f} · R {_trr:.1f} psi</td></tr>')
-    if _tt:
-        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Track Temp</td>'
-                     f'<td style="color:#eee;text-align:right;">{_tt:.0f} °F</td></tr>')
-    if _lrpm:
-        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Launch RPM</td>'
-                     f'<td style="color:#eee;text-align:right;">{_lrpm:,}</td></tr>')
-    if _shift_pt:
-        _rd_rows += (
-            f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Shift Point</td>'
-            f'<td style="color:#cc1111;font-weight:700;text-align:right;">{_shift_pt:,} RPM</td></tr>'
-        )
+        _tire_rows += (f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Tire Press RL / RR</td>'
+                       f'<td style="color:#eee;text-align:right;">{_trl:.1f} / {_trr:.1f} psi</td></tr>')
+
+    # ── Track / Tire Conditions ──
+    _cond_rows  = _rd_row("Track Temp",  _r.get("track_temp_f")  or 0, "{:.0f}", "°F")
+    _cond_rows += _rd_row("Tire Temp",   _r.get("tire_temp_f")   or 0, "{:.0f}", "°F")
+
+    # ── RPM ──
+    _rpm_rows  = _rd_row("Launch RPM",  _r.get("launch_rpm")   or 0, "{:,}")
+    _rpm_rows += _rd_row("Shift Point", _r.get("shift_point")  or 0, "{:,}", "RPM", highlight=True)
+
+    # ── Fuel System ──
+    _fuel_rows  = _rd_row("Main Jet",    _r.get("main_jet")     or 0, "{:.3f}")
+    _fuel_rows += _rd_row("HS Jet",      _r.get("hs_jet")       or 0, "{:.3f}")
+    _fuel_rows += _rd_row("HS Open PSI", _r.get("hs_open_psi")  or 0, "{:.0f}", "psi")
+
+    # ── Blower ──
+    _tp  = _r.get("top_pulley",    0) or 0
+    _bp  = _r.get("bottom_pulley", 0) or 0
+    _od  = _r.get("overdrive",     None)
+    if _od is None and _tp:
+        _od = (_bp / _tp - 1) if _tp else 0.0
+    _blow_rows = ""
+    if _tp:
+        _blow_rows += (f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Top / Bottom Pulley</td>'
+                       f'<td style="color:#eee;text-align:right;">{_tp}" / {_bp}"</td></tr>')
+    if _od is not None and _od != 0:
+        _blow_rows += (f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Overdrive</td>'
+                       f'<td style="color:#eee;text-align:right;">{_od*100:.2f}%</td></tr>')
+    _wbd = _r.get("wheelie_bar_d", 0) or 0
+    _wbp = _r.get("wheelie_bar_p", 0) or 0
+    if _wbd or _wbp:
+        _blow_rows += (f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Wheelie Bar D / P</td>'
+                       f'<td style="color:#eee;text-align:right;">{_wbd:.3f} / {_wbp:.3f}</td></tr>')
+
+    # ── Ignition ──
+    _ign_rows  = _rd_row("Spark Plug", _r.get("spark_plug", ""))
+    _ign_rows += _rd_row("Plug Gap",   _r.get("plug_gap",   ""))
+    _ign_rows += _rd_row("Lash INT/EXT", _r.get("valve_lash", ""))
+
+    # ── Assemble all sections ──
+    _rd_rows = (
+        _rd_section("Tires",                  _tire_rows) +
+        _rd_section("Track / Tire Conditions", _cond_rows) +
+        _rd_section("RPM",                    _rpm_rows)  +
+        _rd_section("Fuel System",            _fuel_rows) +
+        _rd_section("Blower",                 _blow_rows) +
+        _rd_section("Ignition",               _ign_rows)
+    )
+
     if not _rd_rows:
         _rd_rows = ('<tr><td colspan="2" style="color:#555;font-style:italic;padding:4px 0;">'
                     'No details saved yet — open Run Details above to add some.</td></tr>')
+
+    _rnotes = _r.get("notes", "")
     _notes_html = ""
     if _rnotes:
         _notes_html = (f'<div style="margin-top:10px;color:#aaa;font-size:0.82rem;'
-                       f'border-top:1px solid #2a0000;padding-top:8px;">{_rnotes}</div>')
+                       f'border-top:1px solid #2a0000;padding-top:8px;white-space:pre-wrap;">'
+                       f'{_rnotes}</div>')
+
     st.markdown(f"""
 <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
   background:#0a0a0a;font-family:monospace;">
@@ -2885,7 +2950,7 @@ with _pc2:
     border-bottom:1px solid #2a0000;padding-bottom:6px;">
     📋 Run Details
   </div>
-  <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{_rd_rows}</table>
+  <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">{_rd_rows}</table>
   {_notes_html}
 </div>""", unsafe_allow_html=True)
 
