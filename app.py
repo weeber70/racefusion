@@ -1128,6 +1128,16 @@ st.sidebar.markdown("---")
 
 # ── Car Profile (static specs, saved to config) ───────────────────────────────
 st.sidebar.markdown("### 🏎️ Car Profile")
+car_number_input = st.sidebar.text_input(
+    "Your car number",
+    value=cfg.get("car_number", ""),
+    placeholder="e.g. 1234",
+    help="If the slip shows multiple cars, Claude will extract only yours",
+)
+if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number", ""):
+    cfg["car_number"] = car_number_input.strip()
+    save_config(cfg)
+
 with st.sidebar.expander("Car specs", expanded=False):
     st.caption("Fill in once — included in every AI analysis.")
 
@@ -1502,16 +1512,6 @@ if st.session_state.get("_show_timeslip_help", False):
 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 if not api_key:
     st.sidebar.warning("⚠️ ANTHROPIC_API_KEY not set in .env — timeslip scanning and AI tuner unavailable.")
-
-car_number_input = st.sidebar.text_input(
-    "Your car number",
-    value=cfg.get("car_number", ""),
-    placeholder="e.g. 1234",
-    help="If the slip shows multiple cars, Claude will extract only yours",
-)
-if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number", ""):
-    cfg["car_number"] = car_number_input.strip()
-    save_config(cfg)
 
 # Reserve a container so scan status appears in Timeslip Scanner sidebar position
 _scan_status_area = st.sidebar.container()
