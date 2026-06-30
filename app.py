@@ -141,6 +141,32 @@ button[kind="secondary"]:hover {
     background-color: #2a1a1a !important;
     border-color: #cc1111 !important;
 }
+/* ── Form submit buttons ── */
+[data-testid="stFormSubmitButton"] button,
+[data-testid="stFormSubmitButton"] > button,
+.stFormSubmitButton button {
+    background-color: #1a1a24 !important;
+    color: #e8e8e8 !important;
+    border: 1px solid #3a2a2a !important;
+}
+[data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stFormSubmitButton"] > button:hover,
+.stFormSubmitButton button:hover {
+    background-color: #2a1a1a !important;
+    border-color: #cc1111 !important;
+    color: #ffffff !important;
+}
+[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"],
+[data-testid="stFormSubmitButton"] > button[kind="primaryFormSubmit"],
+.stFormSubmitButton button[kind="primaryFormSubmit"] {
+    background-color: #cc1111 !important;
+    color: #ffffff !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:hover {
+    background-color: #ee2222 !important;
+}
 /* ── Expanders ── */
 [data-testid="stExpander"] {
     background-color: #0f0f18 !important;
@@ -167,8 +193,17 @@ button[kind="secondary"]:hover {
     border-radius: 8px !important;
     padding: 12px !important;
 }
-[data-testid="stMetricLabel"] { color: #999 !important; }
-[data-testid="stMetricValue"] { color: #e8e8e8 !important; }
+[data-testid="stMetricLabel"] { color: #999 !important; text-align: center !important; }
+[data-testid="stMetricValue"] { color: #e8e8e8 !important; text-align: center !important; }
+/* Prevent metric values from truncating with "…" — allow wrap and fluid font size */
+[data-testid="stMetricValue"] > div {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    font-size: clamp(1rem, 1.8vw, 2rem) !important;
+    line-height: 1.2 !important;
+    word-break: break-word !important;
+}
 /* ── Tabs & sections ── */
 [data-testid="stHorizontalBlock"] { gap: 1rem; }
 [data-testid="stVerticalBlock"] { gap: 0.5rem; }
@@ -195,6 +230,14 @@ button[kind="secondary"]:hover {
 [data-testid="stFileUploaderDropzone"] button svg path,
 [data-testid="stFileUploader"] button svg path {
     fill: currentColor !important;
+}
+/* ── File uploader — all text dark since bg is white ── */
+[data-testid="stFileUploader"] *:not(button):not(button *):not(svg):not(path) {
+    color: #333333 !important;
+}
+[data-testid="stFileUploader"] button,
+[data-testid="stFileUploader"] button * {
+    color: #ffffff !important;
 }
 /* ── Alerts / Info ── */
 [data-testid="stAlert"] {
@@ -447,6 +490,14 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 # ── Logged in ─────────────────────────────────────────────────────────────────
 _current_user: str = st.session_state["rf_user"]
 
+# ── Upload session state — initialize once, never undefined ──────────────────
+for _k, _v in {
+    "active_run_id": None,  # canonical active run filename
+    "upload_gen":    0,     # incremented by Save & Close to reset form state
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
 # ── Channel groups ────────────────────────────────────────────────────────────
 CHANNEL_GROUPS = {
     "🔥 Engine": [
@@ -631,21 +682,31 @@ def _run_label(filename: str, rec: dict) -> str:
     if track: parts.append(track)
     if et:    parts.append(f"{float(et):.3f}s")
     if mph:   parts.append(f"{float(mph):.2f} mph")
-    return " · ".join(parts) if parts else filename
+    if parts:
+        return " · ".join(parts)
+    # Friendly label for auto-named timeslip-only runs
+    if filename.startswith("slip_") and filename.endswith(".run"):
+        return "🎫 New run — upload timeslip"
+    return filename
 
 def list_saved_runs() -> list[dict]:
     """Return saved runs newest-first, each with label + filename + has_csv + record."""
     if not _sb: return []
     username = st.session_state.get("rf_user", "")
     try:
-        rows = _sb.table("runs").select("csv_filename,run_data,csv_content,created_at").eq("username", username).order("created_at", desc=True).execute().data
+        rows = _sb.table("runs").select("csv_filename,run_data,created_at").eq("username", username).order("created_at", desc=True).execute().data
+        try:
+            _has_csv_set = {r["csv_filename"] for r in
+                _sb.table("runs").select("csv_filename").eq("username", username).not_.is_("csv_content", "null").execute().data}
+        except Exception:
+            _has_csv_set = set()
     except Exception:
         return []
     out = []
     for r in rows:
         csv_name = r["csv_filename"]
         rec = r["run_data"] or {}
-        has_csv = bool(r.get("csv_content"))
+        has_csv = csv_name in _has_csv_set
         try:
             label = _run_label(csv_name, rec)
         except Exception:
@@ -1063,204 +1124,6 @@ if _theme_col2.button("☀️ Light" if _dark_mode else "🌑 Dark", key="theme_
     st.session_state["dark_mode"] = not _dark_mode
     st.rerun()
 
-# ── Run selector / data upload ────────────────────────────────────────────────
-_rp_hdr_col, _rp_help_col = st.sidebar.columns([5, 1])
-_rp_hdr_col.markdown("### 📂 RacePak Data")
-with _rp_help_col:
-    if st.button("❓", key="racepak_help_btn", help="How to export from DataLink II"):
-        st.session_state["_show_racepak_help"] = not st.session_state.get("_show_racepak_help", False)
-
-if st.session_state.get("_show_racepak_help", False):
-    with st.sidebar.expander("📋 How to Export Your RacePak Data", expanded=True):
-        st.markdown("""
-**How to Export Your RacePak Data**
-
-1. Open your run in DataLink II software
-2. Make all channels active
-3. Go to **File** and select **Print/Save ASCII File**
-4. In the dialog that opens, set the following:
-   - **Column Delimiter:** Comma
-   - **New Page Every:** 0 Lines
-   - **Sampling Interval:** 0.02
-   - Leave **"Directly Print in ASCII (no preview)"** unchecked
-5. Click OK and save the file
-6. Return to RaceFusion and upload the saved file in the **RacePak Data** section under Upload New Run
-""")
-
-_saved_runs = list_saved_runs()
-_NEW_RUN = "⊕  Upload new run…"
-
-def _delete_run_files(csv_filename: str):
-    """Delete all data associated with a run from Supabase."""
-    if not _sb: return
-    username = st.session_state.get("rf_user", "")
-    _key = _get_slip_storage_key(csv_filename)
-    if _key:
-        _delete_slip_from_storage(_key)
-    try:
-        _sb.table("runs").delete().eq("username", username).eq("csv_filename", csv_filename).execute()
-    except Exception as e:
-        st.warning(f"Delete failed: {e}")
-
-# Allow Save & Close / Delete to reset the selector back to "Upload new run"
-if st.session_state.get("_reset_selector"):
-    st.session_state.pop("_run_selector_idx", None)
-    st.session_state.pop("run_selector", None)   # clear widget's own stored value too
-    st.session_state["_reset_selector"] = False
-
-# Use index-based selection so label string matching can't cause wrong-run bugs
-_run_options  = [_NEW_RUN] + [r["label"] for r in _saved_runs]
-_sel_idx_raw  = st.sidebar.selectbox(
-    "Select run",
-    options=range(len(_run_options)),
-    format_func=lambda i: _run_options[i],
-    index=st.session_state.get("_run_selector_idx", 0),
-    key="run_selector",
-    help="Pick a saved run or upload a new one",
-)
-st.session_state["_run_selector_idx"] = _sel_idx_raw
-
-uploaded_csv = None
-if _sel_idx_raw == 0:   # "Upload new run…"
-    uploaded_csv = st.sidebar.file_uploader(
-        "Upload RacePak CSV", type=["csv"],
-        help="Export from RacePak DataLink or V-Net — saved automatically",
-        key=f"csv_uploader_{st.session_state.get('_uploader_gen', 0)}",
-    )
-    if uploaded_csv is not None:
-        _csv_bytes = uploaded_csv.read()
-        _active_csv_name  = uploaded_csv.name
-        _active_csv_bytes = _csv_bytes
-        save_run_csv(_active_csv_name, _csv_bytes)
-        # Only wipe stale data the FIRST time this filename appears —
-        # not on every rerender (which would delete the data we just saved).
-        if st.session_state.get("_last_uploaded_csv") != _active_csv_name:
-            _stale_key = _get_slip_storage_key(_active_csv_name)
-            if _stale_key:
-                _delete_slip_from_storage(_stale_key)
-            # Reset run_data (preserves csv_content row)
-            save_run(_active_csv_name, {})
-            st.session_state["_last_uploaded_csv"] = _active_csv_name
-    else:
-        _active_csv_name  = None
-        _active_csv_bytes = None
-
-    # ── Delete ALL runs (nuclear option) ──────────────────────────────────────
-    with st.sidebar.expander("🗑️ Delete ALL runs"):
-        st.caption("Permanently removes every saved run, CSV, and timeslip image.")
-        _confirm_all = st.checkbox("Yes, delete everything", key="confirm_delete_all")
-        if st.button("Delete all runs", disabled=not _confirm_all, type="primary", key="delete_all_btn"):
-            _all_for_delete = list_saved_runs()
-            for _r in _all_for_delete:
-                _k = _r["record"].get("timeslip_storage_key")
-                if _k:
-                    _delete_slip_from_storage(_k)
-            if _sb:
-                try:
-                    _sb.table("runs").delete().eq("username", _current_user).execute()
-                except Exception as e:
-                    st.warning(f"Delete all failed: {e}")
-            st.session_state["_reset_selector"] = True
-            st.rerun()
-
-else:
-    _sel_run_idx  = _sel_idx_raw - 1   # index into _saved_runs
-    _active_run_meta  = _saved_runs[_sel_run_idx]
-    _active_csv_name  = _active_run_meta["filename"]
-    _active_has_csv   = _active_run_meta["has_csv"]
-    _active_csv_bytes = load_run_csv_bytes(_active_csv_name) if _active_has_csv else None
-
-    if _active_has_csv:
-        st.sidebar.caption(f"✅ Loaded: {_active_csv_name}")
-    else:
-        st.sidebar.caption(f"⚠️ CSV not found: {_active_csv_name}")
-
-    # ── Delete run ────────────────────────────────────────────────────────────
-    with st.sidebar.expander("🗑️ Delete this run"):
-        _confirm_delete = st.checkbox("Yes, permanently delete this run", key="confirm_delete")
-        if st.button("Delete run", disabled=not _confirm_delete, type="primary", key="delete_run_btn"):
-            _delete_run_files(_active_csv_name)
-            st.session_state["_reset_selector"] = True
-            st.rerun()
-
-st.sidebar.markdown("---")
-
-# ── Timeslip
-_ts_hdr_col, _ts_help_col = st.sidebar.columns([5, 1])
-_ts_hdr_col.markdown("### 🎫 Timeslip Scanner")
-with _ts_help_col:
-    if st.button("❓", key="timeslip_help_btn", help="How to scan your timeslip"):
-        st.session_state["_show_timeslip_help"] = not st.session_state.get("_show_timeslip_help", False)
-
-if st.session_state.get("_show_timeslip_help", False):
-    with st.sidebar.expander("📋 How to Scan Your Timeslip", expanded=True):
-        st.markdown("""
-**How to Scan Your Timeslip**
-
-1. Take a clear photo of your timeslip with your phone
-2. Transfer the photo to your computer
-3. Upload the photo in the **Timeslip Scanner** section
-""")
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-if not api_key:
-    st.sidebar.warning("⚠️ ANTHROPIC_API_KEY not set in .env — timeslip scanning and AI tuner unavailable.")
-
-car_number_input = st.sidebar.text_input(
-    "Your car number",
-    value=cfg.get("car_number", ""),
-    placeholder="e.g. 1234",
-    help="If the slip shows multiple cars, Claude will extract only yours",
-)
-if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number", ""):
-    cfg["car_number"] = car_number_input.strip()
-    save_config(cfg)
-
-uploaded_slip = st.sidebar.file_uploader(
-    "Upload timeslip photo",
-    type=["jpg", "jpeg", "png", "webp"],
-    help="Saved automatically — only needed once per run",
-    key=f"slip_uploader_{_active_csv_name or 'new'}_{st.session_state.get('_uploader_gen', 0)}",
-)
-
-# Re-scan button and confirmation live here, only shown when data already exists
-if _active_csv_name:
-    _existing_run = load_run(_active_csv_name)
-    _existing_slip_key = _existing_run.get("timeslip_storage_key")
-    if "timeslip" in _existing_run and _existing_slip_key:
-        if st.sidebar.button("🔄 Re-scan timeslip", key="rescan_btn"):
-            _existing_run.pop("timeslip", None)
-            _existing_run.pop("weather", None)
-            save_run(_active_csv_name, _existing_run)
-            st.rerun()
-    if _existing_slip_key:
-        st.sidebar.caption(f"✅ Timeslip on file: {_existing_slip_key.split('/')[-1]}")
-
-st.sidebar.markdown("---")
-
-# ── Location
-st.sidebar.markdown("### 🌤️ Track Location")
-location_input = st.sidebar.text_input(
-    "City or track name",
-    value=cfg.get("location_name", ""),
-    placeholder="e.g. Union Grove WI",
-    help="Enter city name (no comma), or paste lat/lon coordinates like 42.694, -88.059",
-)
-if st.sidebar.button("Save location"):
-    if location_input.strip():
-        lat, lon, label = geocode(location_input.strip())
-        if lat:
-            cfg["location_name"] = location_input.strip()
-            cfg["location_label"] = label
-            cfg["lat"] = lat
-            cfg["lon"] = lon
-            save_config(cfg)
-            st.sidebar.success(f"Saved: {label}")
-        else:
-            st.sidebar.error("Location not found — try a different name.")
-
-if cfg.get("location_label"):
-    st.sidebar.caption(f"📍 {cfg['location_label']}")
-
 st.sidebar.markdown("---")
 
 # ── Car Profile (static specs, saved to config) ───────────────────────────────
@@ -1400,31 +1263,551 @@ weight_input = int(cfg.get("car_weight_lbs", 3200))
 
 st.sidebar.markdown("---")
 
+# ── Run Manager ───────────────────────────────────────────────────────────────
+st.sidebar.markdown("### 🗂️ Run Manager")
+
+_saved_runs = list_saved_runs()
+import sys
+print(f'[RF-DEBUG] RENDER START: active_run_id={st.session_state.get("active_run_id")!r}, run_selector={st.session_state.get("run_selector")!r}, _run_selector_idx={st.session_state.get("_run_selector_idx")!r}, saved_runs_count={len(_saved_runs)}, qp_run={st.query_params.get("run")!r}', file=sys.stderr, flush=True)
+_qp_run = st.query_params.get("run")
+if _qp_run and not st.session_state.get("active_run_id"):
+    st.session_state["active_run_id"] = _qp_run
+_NEW_RUN = "⊕  New run…"
+
+def _delete_run_files(csv_filename: str):
+    """Delete all data associated with a run from Supabase."""
+    if not _sb: return
+    username = st.session_state.get("rf_user", "")
+    _key = _get_slip_storage_key(csv_filename)
+    if _key:
+        _delete_slip_from_storage(_key)
+    try:
+        _sb.table("runs").delete().eq("username", username).eq("csv_filename", csv_filename).execute()
+    except Exception as e:
+        st.warning(f"Delete failed: {e}")
+
+# Reset selector after delete
+if st.session_state.get("_reset_selector"):
+    st.session_state.pop("_run_selector_idx", None)
+    st.session_state.pop("run_selector", None)
+    st.session_state["active_run_id"] = None
+    st.query_params.pop("run", None)
+    st.session_state["_reset_selector"] = False
+
+# Show post-delete success messages (visible for one render cycle)
+if st.session_state.pop("_delete_success", False):
+    st.sidebar.success("✅ Run deleted.")
+if st.session_state.pop("_delete_all_success", False):
+    st.sidebar.success("✅ All runs deleted.")
+
+# ── active_run_id: single source of truth for which run is active ─────────────
+# File uploads set this. It is only cleared by explicit user action (delete or
+# picking "New run" from the dropdown). A rerun caused by a file upload must
+# NEVER clear it — that is what was causing the screen to go blank.
+#
+# on_change fires when the USER moves the dropdown; file-upload reruns do not
+# fire on_change. We use this to distinguish the two cases.
+def _on_run_selector_change():
+    st.session_state["_user_changed_run"] = True
+
+_user_changed_run = st.session_state.pop("_user_changed_run", False)
+_active_run_id = st.session_state.get("active_run_id")
+
+if _active_run_id and not _user_changed_run:
+    # File-upload rerun — force the selectbox back to the active run.
+    # (Without this, Streamlit can silently reset the selectbox to index 0.)
+    _sync_idx = 0
+    for _i, _r in enumerate(_saved_runs):
+        if _r["filename"] == _active_run_id:
+            _sync_idx = _i + 1
+            break
+    if _sync_idx > 0:
+        # Only pop `run_selector` when the index genuinely needs to change —
+        # popping on every render can spuriously fire the on_change callback.
+        if st.session_state.get("_run_selector_idx") != _sync_idx:
+            st.session_state["_run_selector_idx"] = _sync_idx
+            st.session_state.pop("run_selector", None)   # force index param to take effect
+    elif _saved_runs:
+        # _saved_runs is non-empty but doesn't contain this run → deleted externally
+        st.session_state["active_run_id"] = None
+        st.query_params.pop("run", None)
+    # If _saved_runs is empty, Supabase may have failed — preserve active_run_id
+
+if "_restore_run_selector" in st.session_state:
+    _pending_idx = st.session_state.pop("_restore_run_selector")
+    # Only apply if active_run_id still matches what we were restoring
+    _current_aid = st.session_state.get("active_run_id")
+    if _current_aid and _pending_idx > 0:
+        _expected_name = _saved_runs[_pending_idx - 1]["filename"] if _pending_idx <= len(_saved_runs) else None
+        if _expected_name == _current_aid:
+            st.session_state["run_selector"] = _pending_idx
+
+_run_options  = [_NEW_RUN] + [r["label"] for r in _saved_runs]
+_safe_sel_idx = min(
+    st.session_state.get("_run_selector_idx", 0),
+    max(0, len(_run_options) - 1)
+)
+_sel_idx_raw  = st.sidebar.selectbox(
+    "Select run",
+    options=range(len(_run_options)),
+    format_func=lambda i: _run_options[i],
+    index=_safe_sel_idx,
+    key="run_selector",
+    help="Pick a saved run or upload a new one",
+    on_change=_on_run_selector_change,
+)
+st.session_state["_run_selector_idx"] = _sel_idx_raw
+
+# Prevent IndexError when _saved_runs is empty or shorter than selectbox expects
+if _sel_idx_raw > 0 and (_sel_idx_raw - 1) >= len(_saved_runs):
+    _sel_idx_raw = 0
+    st.session_state["run_selector"] = 0
+    st.session_state["_run_selector_idx"] = 0
+
+# Guard against false-positive "user changed run" caused by widget reset after st.rerun()
+if _user_changed_run and _sel_idx_raw == 0:
+    _aid = st.session_state.get("active_run_id")
+    _qp  = st.query_params.get("run")
+    if _aid and _qp == _aid:
+        # active_run_id and query params both confirm a run is active —
+        # the selectbox reset to 0 due to st.rerun(), not user action. Ignore it.
+        _user_changed_run = False
+        _true_idx = next(
+            (i + 1 for i, r in enumerate(_saved_runs) if r["filename"] == _aid), 0
+        )
+        if _true_idx > 0:
+            st.session_state["_restore_run_selector"] = _true_idx
+            st.session_state["_run_selector_idx"] = _true_idx
+            _sel_idx_raw = _true_idx
+
+# Set active run state and keep active_run_id in sync with the selectbox.
+# NOTE: _active_csv_bytes is NOT loaded here — it's loaded after the processing
+# zone, once we know the final active run. Loading it here would use stale data
+# if an upload is being processed on this render.
+if _sel_idx_raw == 0:
+    _active_csv_name  = None
+    _active_has_csv   = False
+    # Only clear active_run_id when the user deliberately chose "New run"
+    if _user_changed_run:
+        st.session_state["active_run_id"] = None
+        st.query_params.pop("run", None)
+else:
+    _sel_run_meta     = _saved_runs[_sel_idx_raw - 1]
+    _active_csv_name  = _sel_run_meta["filename"]
+    _active_has_csv   = _sel_run_meta["has_csv"]
+    st.session_state["active_run_id"] = _active_csv_name   # always keep in sync
+    st.query_params["run"] = _active_csv_name
+    # Delete button
+    if st.sidebar.button("🗑️ Delete this run", key="delete_run_btn", type="primary",
+                         use_container_width=True):
+        _delete_run_files(_active_csv_name)
+        st.session_state["_reset_selector"] = True
+        st.session_state["_delete_success"] = True
+        st.rerun()
+
+# Delete ALL runs — available regardless of selection
+# _delete_all_open drives the expander so we can collapse it after deletion
+with st.sidebar.expander("🗑️ Delete ALL runs",
+                         expanded=st.session_state.pop("_delete_all_open", False)):
+    st.caption("Permanently removes every saved run, CSV, and timeslip image.")
+    _confirm_all = st.checkbox("Yes, delete everything", key="confirm_delete_all")
+    if st.button("Delete all runs", disabled=not _confirm_all, type="primary", key="delete_all_btn"):
+        _all_for_delete = list_saved_runs()
+        for _r in _all_for_delete:
+            _k = _r["record"].get("timeslip_storage_key")
+            if _k:
+                _delete_slip_from_storage(_k)
+        if _sb:
+            try:
+                _sb.table("runs").delete().eq("username", _current_user).execute()
+            except Exception as e:
+                st.warning(f"Delete all failed: {e}")
+        # Reset checkbox, collapse expander, flag success message
+        st.session_state.pop("confirm_delete_all", None)
+        st.session_state["_reset_selector"] = True
+        st.session_state["_delete_all_success"] = True
+        # _delete_all_open intentionally not set → expander defaults to collapsed
+        st.rerun()
+
+st.sidebar.markdown("---")
+
+# ── RacePak Data ──────────────────────────────────────────────────────────────
+_rp_hdr_col, _rp_help_col = st.sidebar.columns([5, 1])
+_rp_hdr_col.markdown("### 📂 RacePak Data")
+with _rp_help_col:
+    if st.button("❓", key="racepak_help_btn", help="How to export from DataLink II"):
+        st.session_state["_show_racepak_help"] = not st.session_state.get("_show_racepak_help", False)
+
+if st.session_state.get("_show_racepak_help", False):
+    with st.sidebar.expander("📋 How to Export Your RacePak Data", expanded=True):
+        st.markdown("""
+**How to Export Your RacePak Data**
+
+1. Open your run in DataLink II software
+2. Make all channels active
+3. Go to **File** and select **Print/Save ASCII File**
+4. In the dialog that opens, set the following:
+   - **Column Delimiter:** Comma
+   - **New Page Every:** 0 Lines
+   - **Sampling Interval:** 0.02
+   - Leave **"Directly Print in ASCII (no preview)"** unchecked
+5. Click OK and save the file
+6. Return to RaceFusion and upload the saved file in the **RacePak Data** section
+""")
+
+if _sel_idx_raw == 0:   # "New run…"
+    st.sidebar.caption("📋 Use the **Create New Run** form in the main area →")
+elif _active_has_csv:
+    st.sidebar.caption(f"✅ Loaded: {_active_csv_name}")
+elif _active_csv_name and _active_csv_name.endswith(".run"):
+    # Timeslip-only run — auto-process CSV as soon as one is selected
+    _csv_up_key    = f"_add_csv_up_{_active_csv_name}"
+    _csv_saved_key = f"_csv_saved_{_active_csv_name}"
+    _add_csv_file  = st.sidebar.file_uploader(
+        "Add RacePak CSV to this run",
+        type=["csv"],
+        key=_csv_up_key,
+        help="Attach a RacePak CSV to combine with your timeslip data",
+    )
+    if _add_csv_file is not None and not st.session_state.get(_csv_saved_key):
+        with st.sidebar.spinner("💾 Saving CSV…"):
+            save_run_csv(_active_csv_name, _add_csv_file.read())
+            st.session_state["active_run_id"] = _active_csv_name
+            st.query_params["run"] = _active_csv_name
+            st.session_state[_csv_saved_key] = True
+        st.rerun()
+    elif _add_csv_file is None:
+        st.sidebar.caption("🎫 Timeslip-only — add channel data above")
+else:
+    st.sidebar.caption(f"⚠️ CSV not found: {_active_csv_name}")
+
+st.sidebar.markdown("---")
+
+# ── Timeslip
+_ts_hdr_col, _ts_help_col = st.sidebar.columns([5, 1])
+_ts_hdr_col.markdown("### 🎫 Timeslip Scanner")
+with _ts_help_col:
+    if st.button("❓", key="timeslip_help_btn", help="How to scan your timeslip"):
+        st.session_state["_show_timeslip_help"] = not st.session_state.get("_show_timeslip_help", False)
+
+if st.session_state.get("_show_timeslip_help", False):
+    with st.sidebar.expander("📋 How to Scan Your Timeslip", expanded=True):
+        st.markdown("""
+**How to Scan Your Timeslip**
+
+1. Take a clear photo of your timeslip with your phone
+2. Transfer the photo to your computer
+3. Upload the photo in the **Timeslip Scanner** section
+""")
+api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+if not api_key:
+    st.sidebar.warning("⚠️ ANTHROPIC_API_KEY not set in .env — timeslip scanning and AI tuner unavailable.")
+
+car_number_input = st.sidebar.text_input(
+    "Your car number",
+    value=cfg.get("car_number", ""),
+    placeholder="e.g. 1234",
+    help="If the slip shows multiple cars, Claude will extract only yours",
+)
+if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number", ""):
+    cfg["car_number"] = car_number_input.strip()
+    save_config(cfg)
+
+# Reserve a container so scan status appears in Timeslip Scanner sidebar position
+_scan_status_area = st.sidebar.container()
+
+if _sel_idx_raw == 0:
+    # New run — slip is uploaded via the Create New Run form in the main area
+    st.sidebar.caption("📋 Add a timeslip in the **Create New Run** form →")
+elif _active_csv_name:
+    _existing_run     = load_run(_active_csv_name)
+    _existing_slip_key = _existing_run.get("timeslip_storage_key")
+    if not _existing_slip_key:
+        # No timeslip yet — auto-process as soon as a photo is selected
+        _slip_up_key    = f"_add_slip_up_{_active_csv_name}"
+        _slip_saved_key = f"_slip_saved_{_active_csv_name}"
+        _add_slip_file  = st.sidebar.file_uploader(
+            "Upload timeslip photo",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=_slip_up_key,
+            help="Clear photo of your printed timeslip",
+        )
+        if _add_slip_file is not None and not st.session_state.get(_slip_saved_key):
+            _sl_bytes = _add_slip_file.read()
+            _sl_ext   = _add_slip_file.name.rsplit(".", 1)[-1].lower()
+            _sl_stem  = re.sub(r"[^\w\-]", "_", Path(_active_csv_name).stem)
+            _sl_key   = f"{_current_user}/{_sl_stem}.{_sl_ext}"
+            _sl_mime  = {"jpg":"image/jpeg","jpeg":"image/jpeg",
+                         "png":"image/png","webp":"image/webp"}.get(_sl_ext, "image/jpeg")
+            _slip_upload_ok = True
+            with _scan_status_area.status("📤 Uploading timeslip…", expanded=True) as _add_slip_status:
+                # 1. Upload to storage
+                if _sb:
+                    try:
+                        _sb.storage.from_("timeslips").upload(
+                            path=_sl_key, file=_sl_bytes,
+                            file_options={"upsert": "true", "content-type": _sl_mime},
+                        )
+                    except Exception as _sl_se:
+                        _add_slip_status.update(label=f"❌ Upload failed: {_sl_se}", state="error")
+                        _slip_upload_ok = False
+
+                if _slip_upload_ok:
+                    _existing_run["timeslip_storage_key"] = _sl_key
+                    _existing_run.pop("timeslip", None)
+                    _existing_run.pop("weather", None)
+                    save_run(_active_csv_name, _existing_run)
+
+                    # 2. Scan inline — same pattern as Create New Run form
+                    if api_key:
+                        _add_slip_status.write("🎫 Scanning timeslip…")
+                        try:
+                            _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
+                            _existing_run["timeslip"] = _scan_result
+
+                            # 3. Fetch weather
+                            _slip_date = _scan_result.get("date")
+                            if _slip_date:
+                                _slip_hour = 12
+                                if _scan_result.get("time"):
+                                    try:
+                                        _slip_hour = int(str(_scan_result["time"]).split(":")[0])
+                                    except Exception:
+                                        _slip_hour = 12
+                                _wx_lat, _wx_lon, _wx_label = None, None, ""
+                                _as_track = (_scan_result.get("track_location")
+                                             or _scan_result.get("track_name") or "")
+                                if _as_track:
+                                    _add_slip_status.write(f"📍 Geocoding {_as_track}…")
+                                    _wx_lat, _wx_lon, _wx_label = geocode(_as_track)
+                                if _wx_lat is None and cfg.get("lat"):
+                                    _wx_lat  = cfg["lat"]
+                                    _wx_lon  = cfg["lon"]
+                                    _wx_label = cfg.get("location_label", "")
+                                if _wx_lat is not None:
+                                    _add_slip_status.write("🌤️ Fetching weather…")
+                                    try:
+                                        _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
+                                        _da = calc_density_altitude(
+                                            _wx.get("temperature_f"),
+                                            _wx.get("humidity_pct"),
+                                            _wx.get("pressure_hpa"),
+                                        )
+                                        if _da is not None:
+                                            _wx["density_alt_ft"] = round(_da)
+                                        _existing_run["weather"]          = _wx
+                                        _existing_run["weather_date"]     = _slip_date
+                                        _existing_run["weather_location"] = _wx_label
+                                    except Exception as _wx_e:
+                                        _add_slip_status.write(f"⚠️ Weather unavailable: {_wx_e}")
+                        except Exception as _scan_e:
+                            _add_slip_status.write(f"⚠️ Scan failed: {_scan_e}")
+
+                    save_run(_active_csv_name, _existing_run)
+                    st.session_state["active_run_id"] = _active_csv_name
+                    st.query_params["run"] = _active_csv_name
+                    st.session_state[_slip_saved_key] = True
+                    _add_slip_status.update(label="✅ Timeslip added!", state="complete", expanded=False)
+
+            if _slip_upload_ok:
+                st.rerun()
+    else:
+        # Timeslip already on file — show re-scan / delete controls
+        _rescan_col, _del_slip_col = st.sidebar.columns(2)
+        if _rescan_col.button("🔄 Re-scan", key="rescan_btn", use_container_width=True):
+            _existing_run.pop("timeslip", None)
+            _existing_run.pop("weather", None)
+            save_run(_active_csv_name, _existing_run)
+            st.rerun()
+        if _del_slip_col.button("🗑️ Delete", key="del_slip_btn", use_container_width=True):
+            _delete_slip_from_storage(_existing_slip_key)
+            _existing_run.pop("timeslip", None)
+            _existing_run.pop("weather", None)
+            _existing_run.pop("timeslip_storage_key", None)
+            save_run(_active_csv_name, _existing_run)
+            st.rerun()
+        st.sidebar.caption(f"✅ Timeslip on file: {_existing_slip_key.split('/')[-1]}")
+
+st.sidebar.markdown("---")
+
+# ── Location
+st.sidebar.markdown("### 🌤️ Track Location")
+location_input = st.sidebar.text_input(
+    "City or track name",
+    value=cfg.get("location_name", ""),
+    placeholder="e.g. Union Grove WI",
+    help="Enter city name (no comma), or paste lat/lon coordinates like 42.694, -88.059",
+)
+if st.sidebar.button("Save location"):
+    if location_input.strip():
+        lat, lon, label = geocode(location_input.strip())
+        if lat:
+            cfg["location_name"] = location_input.strip()
+            cfg["location_label"] = label
+            cfg["lat"] = lat
+            cfg["lon"] = lon
+            save_config(cfg)
+            st.sidebar.success(f"Saved: {label}")
+        else:
+            st.sidebar.error("Location not found — try a different name.")
+
+if cfg.get("location_label"):
+    st.sidebar.caption(f"📍 {cfg['location_label']}")
+
 # ── Main area ─────────────────────────────────────────────────────────────────
-if _active_csv_name is None:
-    _bg = "#08080d" if _dark_mode else "#f5f5f7"
+print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
+if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
+    # ── Create New Run form ───────────────────────────────────────────────────
     _fg = "#888" if _dark_mode else "#666"
     if _LOGO_SRC:
         st.markdown(
-            f'<div style="text-align:center;padding:60px 20px 20px;">'
-            f'<img src="{_LOGO_SRC}" style="max-width:600px;width:80%;margin-bottom:24px;">'
-            f'<p style="font-size:1.2rem;color:{_fg};">'
-            f'Select a saved run or upload a new RacePak CSV from the sidebar.</p></div>',
+            f'<div style="text-align:center;padding:32px 20px 8px;">'
+            f'<img src="{_LOGO_SRC}" style="max-width:460px;width:65%;"></div>',
             unsafe_allow_html=True,
         )
     else:
-        st.markdown(
-            f"<div style='text-align:center;padding:80px 20px;'>"
-            f"<h1>🏁 RaceFusion</h1>"
-            f"<p style='font-size:1.2rem;color:{_fg};'>"
-            f"Select a saved run or upload a new RacePak CSV from the sidebar.</p></div>",
-            unsafe_allow_html=True,
+        st.markdown("<h2 style='text-align:center'>🏁 RaceFusion</h2>", unsafe_allow_html=True)
+
+    st.markdown("### Create New Run")
+    st.caption("Upload what you have — all fields are optional. Click **Create Run** when ready.")
+
+    with st.form(f"create_run_form_{st.session_state['upload_gen']}", clear_on_submit=True):
+        _form_csv_col, _form_slip_col = st.columns(2)
+        with _form_csv_col:
+            st.markdown("**📂 RacePak CSV**")
+            _form_csv_file = st.file_uploader(
+                "RacePak CSV", type=["csv"],
+                help="Export from RacePak DataLink or V-Net",
+                label_visibility="collapsed",
+            )
+        with _form_slip_col:
+            st.markdown("**🎫 Timeslip Photo**")
+            _form_slip_file = st.file_uploader(
+                "Timeslip photo", type=["jpg", "jpeg", "png", "webp"],
+                help="Clear photo of your printed timeslip",
+                label_visibility="collapsed",
+            )
+        _form_note = st.text_input(
+            "Run note (optional)",
+            placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
         )
+        _form_submitted = st.form_submit_button(
+            "🏁 Create Run", type="primary", use_container_width=True,
+        )
+
+    if _form_submitted:
+        if _form_csv_file is None and _form_slip_file is None:
+            st.error("Upload at least a RacePak CSV or a timeslip photo.")
+        else:
+            # ── Determine run filename ────────────────────────────────────────
+            if _form_csv_file is not None:
+                _new_run_id    = _form_csv_file.name
+                _new_csv_bytes = _form_csv_file.read()
+            else:
+                from datetime import datetime as _dt_form
+                _new_run_id    = f"slip_{_dt_form.now().strftime('%Y%m%d_%H%M%S')}.run"
+                _new_csv_bytes = None
+
+            _new_run_rec = {}
+            if _form_note.strip():
+                _new_run_rec["run_note"] = _form_note.strip()
+
+            with st.status("Creating run…", expanded=True) as _create_status:
+
+                # ── Save CSV ──────────────────────────────────────────────────
+                if _new_csv_bytes is not None:
+                    _create_status.write("💾 Saving CSV data…")
+                    _stale_key = _get_slip_storage_key(_new_run_id)
+                    if _stale_key:
+                        _delete_slip_from_storage(_stale_key)
+                    save_run_csv(_new_run_id, _new_csv_bytes)
+
+                save_run(_new_run_id, _new_run_rec)
+
+                # ── Upload + scan timeslip ────────────────────────────────────
+                if _form_slip_file is not None:
+                    _create_status.write("📤 Uploading timeslip…")
+                    _sl_bytes = _form_slip_file.read()
+                    _sl_ext   = _form_slip_file.name.rsplit(".", 1)[-1].lower()
+                    _sl_stem  = re.sub(r"[^\w\-]", "_", Path(_new_run_id).stem)
+                    _sl_s_key = f"{_current_user}/{_sl_stem}.{_sl_ext}"
+                    _sl_mime  = {"jpg":"image/jpeg","jpeg":"image/jpeg",
+                                 "png":"image/png","webp":"image/webp"}.get(_sl_ext, "image/jpeg")
+                    if _sb:
+                        try:
+                            _sb.storage.from_("timeslips").upload(
+                                path=_sl_s_key, file=_sl_bytes,
+                                file_options={"upsert": "true", "content-type": _sl_mime},
+                            )
+                        except Exception as _sl_se:
+                            st.warning(f"Timeslip upload failed: {_sl_se}")
+                    _new_run_rec["timeslip_storage_key"] = _sl_s_key
+
+                    if api_key:
+                        _create_status.write("🎫 Scanning timeslip…")
+                        try:
+                            _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
+                            _new_run_rec["timeslip"] = _scan_result
+
+                            # ── Fetch weather ─────────────────────────────────
+                            _slip_date = _scan_result.get("date")
+                            if _slip_date:
+                                _slip_hour = 12
+                                if _scan_result.get("time"):
+                                    try:
+                                        _slip_hour = int(str(_scan_result["time"]).split(":")[0])
+                                    except Exception:
+                                        _slip_hour = 12
+                                _wx_lat, _wx_lon, _wx_label = None, None, ""
+                                _track = (_scan_result.get("track_location")
+                                          or _scan_result.get("track_name") or "")
+                                if _track:
+                                    _create_status.write(f"📍 Geocoding {_track}…")
+                                    _wx_lat, _wx_lon, _wx_label = geocode(_track)
+                                if _wx_lat is None and cfg.get("lat"):
+                                    _wx_lat  = cfg["lat"]
+                                    _wx_lon  = cfg["lon"]
+                                    _wx_label = cfg.get("location_label", "")
+                                if _wx_lat is not None:
+                                    _create_status.write("🌤️ Fetching weather…")
+                                    try:
+                                        _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
+                                        _da = calc_density_altitude(
+                                            _wx.get("temperature_f"),
+                                            _wx.get("humidity_pct"),
+                                            _wx.get("pressure_hpa"),
+                                        )
+                                        if _da is not None:
+                                            _wx["density_alt_ft"] = round(_da)
+                                        _new_run_rec["weather"]          = _wx
+                                        _new_run_rec["weather_date"]     = _slip_date
+                                        _new_run_rec["weather_location"] = _wx_label
+                                    except Exception as _wx_e:
+                                        st.warning(f"Weather fetch failed: {_wx_e}")
+                        except Exception as _scan_e:
+                            st.warning(f"Timeslip scan failed: {_scan_e}")
+
+                    save_run(_new_run_id, _new_run_rec)
+
+                _create_status.update(label="✅ Run created!", state="complete")
+
+            st.session_state["active_run_id"] = _new_run_id
+            st.query_params["run"] = _new_run_id
+            st.session_state.pop("_restore_run_selector", None)
+            st.rerun()
+
     st.stop()
 
 # ── Load RacePak data (may be None for closed runs) ───────────────────────────
-csv_name = _active_csv_name
-_csv_available = _active_csv_bytes is not None
+csv_name = st.session_state.get("active_run_id")
+if csv_name is None and _sel_idx_raw > 0 and _sel_idx_raw <= len(_saved_runs):
+    csv_name = _saved_runs[_sel_idx_raw - 1]["filename"]
+    st.session_state["active_run_id"] = csv_name
+    st.query_params["run"] = csv_name
+# Load CSV bytes now — deferred from the sidebar so uploads are fully processed first
+_run_meta_now     = next((r for r in _saved_runs if r["filename"] == csv_name), None)
+_active_csv_bytes = load_run_csv_bytes(csv_name) if (_run_meta_now and _run_meta_now["has_csv"]) else None
+_csv_available    = _active_csv_bytes is not None
 
 if _csv_available:
     df = load_racepak_csv(_active_csv_bytes)
@@ -1451,40 +1834,70 @@ else:
     channel_to_group = {}
     groups_present = []
 
+# ── Sidebar: Channel Rules (always visible, after Track Location) ─────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ⚠️ Channel Rules")
+_rules = cfg.get("channel_rules", {})
+
+with st.sidebar.expander("Add / Edit Rule", expanded=False):
+    _rule_ch = st.selectbox("Channel", options=[""] + available_channels, key="rule_ch")
+    if _rule_ch:
+        _existing = _rules.get(_rule_ch, {})
+        _col_a, _col_b = st.columns(2)
+        _use_min = _col_a.checkbox("Min", value="min" in _existing, key="rule_use_min")
+        _use_max = _col_b.checkbox("Max", value="max" in _existing, key="rule_use_max")
+        _min_val = _col_a.number_input(
+            "Min value", value=float(_existing.get("min", 0)),
+            disabled=not _use_min, key="rule_min_val",
+        )
+        _max_val = _col_b.number_input(
+            "Max value", value=float(_existing.get("max", 0)),
+            disabled=not _use_max, key="rule_max_val",
+        )
+        if st.button("💾 Save Rule", key="save_rule_btn"):
+            _new_rule = {}
+            if _use_min:
+                _new_rule["min"] = _min_val
+            if _use_max:
+                _new_rule["max"] = _max_val
+            if _new_rule:
+                _rules[_rule_ch] = _new_rule
+                cfg["channel_rules"] = _rules
+                save_config(cfg)
+                st.success(f"Rule saved for {_rule_ch}")
+                st.rerun()
+
+# List existing rules with remove buttons
+if _rules:
+    for _ch, _rule in list(_rules.items()):
+        _parts = []
+        if "min" in _rule:
+            _parts.append(f"min {_rule['min']}")
+        if "max" in _rule:
+            _parts.append(f"max {_rule['max']}")
+        _rcol1, _rcol2 = st.sidebar.columns([3, 1])
+        _rcol1.caption(f"**{_ch}**: {' · '.join(_parts)}")
+        if _rcol2.button("✕", key=f"del_rule_{_ch}"):
+            del _rules[_ch]
+            cfg["channel_rules"] = _rules
+            save_config(cfg)
+            st.rerun()
+else:
+    st.sidebar.caption("No rules set yet.")
+
 # ── Load or init run record ───────────────────────────────────────────────────
 run = load_run(csv_name)
 
-# ── Resolve timeslip image ────────────────────────────────────────────────────
+# ── Load timeslip image from storage ─────────────────────────────────────────
+# All upload processing (including saving to storage) is handled by the
+# processing zone above. Here we just load whatever is already stored.
 _slip_storage_key = run.get("timeslip_storage_key")
 _slip_bytes = None
 _slip_ext   = None
 _slip_media = None
 _SLIP_MIME  = {"jpg":"image/jpeg","jpeg":"image/jpeg","png":"image/png","webp":"image/webp"}
 
-if uploaded_slip is not None:
-    # New upload — save to Supabase Storage
-    _slip_ext = uploaded_slip.name.rsplit(".", 1)[-1].lower()
-    _stem = re.sub(r"[^\w\-]", "_", Path(csv_name).stem)
-    _new_slip_key = f"{_current_user}/{_stem}.{_slip_ext}"
-    _slip_bytes = uploaded_slip.read()
-    _slip_media = _SLIP_MIME.get(_slip_ext, "image/jpeg")
-    if _sb:
-        try:
-            _sb.storage.from_("timeslips").upload(
-                path=_new_slip_key, file=_slip_bytes,
-                file_options={"upsert": "true", "content-type": _slip_media}
-            )
-        except Exception as _se:
-            st.warning(f"Timeslip upload failed: {_se}")
-    # Store key in run record
-    if _slip_storage_key and _slip_storage_key != _new_slip_key:
-        _delete_slip_from_storage(_slip_storage_key)
-    run["timeslip_storage_key"] = _new_slip_key
-    save_run(csv_name, run)
-    _slip_storage_key = _new_slip_key
-
-elif _slip_storage_key and _sb:
-    # Load existing timeslip from Storage
+if _slip_storage_key and _sb:
     try:
         _raw = _sb.storage.from_("timeslips").download(_slip_storage_key)
         _slip_bytes = bytes(_raw)
@@ -1495,24 +1908,20 @@ elif _slip_storage_key and _sb:
         _slip_storage_key = None
 
 # ── Scan timeslip if image available and data not yet extracted ───────────────
-# Also re-scan automatically if a new image was just uploaded (overrides existing data)
-if uploaded_slip is not None and "timeslip" in run:
-    run.pop("timeslip", None)
-    run.pop("weather", None)
-    save_run(csv_name, run)
-
 if _slip_bytes is not None and "timeslip" not in run:
     if not api_key:
-        st.warning("⚠️ Enter your Anthropic API key in the sidebar to scan the timeslip.")
+        _scan_status_area.warning("⚠️ ANTHROPIC_API_KEY not set — timeslip scanning unavailable.")
     else:
-        with st.spinner("🎫 Scanning timeslip with Claude vision…"):
+        with _scan_status_area.status("🎫 Scanning timeslip…", expanded=False) as _scan_status:
             try:
                 slip_data = scan_timeslip(_slip_bytes, _slip_media, api_key, car_number_input)
                 run["timeslip"] = slip_data
                 run["csv_name"] = csv_name
                 save_run(csv_name, run)
-                st.success("✅ Timeslip scanned successfully!")
+                _scan_status.update(label="✅ Timeslip scanned!", state="complete", expanded=False)
+                st.rerun()
             except Exception as e:
+                _scan_status.update(label="❌ Scan failed", state="error", expanded=True)
                 st.error(f"Timeslip scan failed: {e}")
 
 
@@ -1531,12 +1940,14 @@ if slip and "weather" not in run and slip.get("date"):
     # Resolve lat/lon: timeslip track_location first, then manual config
     wx_lat, wx_lon, wx_label = None, None, ""
 
-    track_loc = slip.get("track_location") or ""
+    track_loc = slip.get("track_location") or slip.get("track_name") or ""
     if track_loc:
-        with st.spinner(f"📍 Geocoding track: {track_loc}…"):
+        with st.sidebar.status(f"📍 Geocoding: {track_loc}…", expanded=False) as _geo_status:
             wx_lat, wx_lon, wx_label = geocode(track_loc)
-        if wx_lat is None:
-            st.info(f"📍 Couldn't geocode '{track_loc}' from timeslip — trying saved location.")
+            if wx_lat is None:
+                _geo_status.update(label=f"📍 Couldn't geocode '{track_loc}'", state="error", expanded=False)
+            else:
+                _geo_status.update(label=f"📍 {wx_label}", state="complete", expanded=False)
 
     if wx_lat is None and cfg.get("lat"):
         wx_lat = cfg["lat"]
@@ -1544,7 +1955,7 @@ if slip and "weather" not in run and slip.get("date"):
         wx_label = cfg.get("location_label", "")
 
     if wx_lat is not None:
-        with st.spinner("🌤️ Fetching historical weather…"):
+        with st.sidebar.status("🌤️ Fetching weather…", expanded=False) as _wx_status:
             try:
                 wx = fetch_weather(wx_lat, wx_lon, date_str, hour)
                 # Compute DA from API values and persist it so the AI always has it
@@ -1557,10 +1968,13 @@ if slip and "weather" not in run and slip.get("date"):
                 run["weather_date"] = date_str
                 run["weather_location"] = wx_label
                 save_run(csv_name, run)
+                _wx_status.update(label="✅ Weather fetched!", state="complete", expanded=False)
+                st.rerun()
             except Exception as e:
-                st.warning(f"Weather fetch failed: {e}")
+                _wx_status.update(label="❌ Weather fetch failed", state="error", expanded=True)
+                st.sidebar.warning(f"Weather fetch failed: {e}")
     else:
-        st.info("📍 No track location found. Enter one in the sidebar → Track Location to fetch weather.")
+        st.sidebar.info("📍 No track location found. Enter one in Track Location below to fetch weather.")
 
 # _rd and _changelog loaded here so they're available throughout the dashboard
 # If this run has no saved details yet, pre-fill from Car Profile in config
@@ -1635,56 +2049,6 @@ else:
     custom_channels = []
     chart_height = 320
     mode = "lines"
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚠️ Channel Rules")
-_rules = cfg.get("channel_rules", {})
-
-with st.sidebar.expander("Add / Edit Rule", expanded=False):
-    _rule_ch = st.selectbox("Channel", options=[""] + available_channels, key="rule_ch")
-    if _rule_ch:
-        _existing = _rules.get(_rule_ch, {})
-        _col_a, _col_b = st.columns(2)
-        _use_min = _col_a.checkbox("Min", value="min" in _existing, key="rule_use_min")
-        _use_max = _col_b.checkbox("Max", value="max" in _existing, key="rule_use_max")
-        _min_val = _col_a.number_input(
-            "Min value", value=float(_existing.get("min", 0)),
-            disabled=not _use_min, key="rule_min_val",
-        )
-        _max_val = _col_b.number_input(
-            "Max value", value=float(_existing.get("max", 0)),
-            disabled=not _use_max, key="rule_max_val",
-        )
-        if st.button("💾 Save Rule"):
-            _new_rule = {}
-            if _use_min:
-                _new_rule["min"] = _min_val
-            if _use_max:
-                _new_rule["max"] = _max_val
-            if _new_rule:
-                _rules[_rule_ch] = _new_rule
-                cfg["channel_rules"] = _rules
-                save_config(cfg)
-                st.success(f"Rule saved for {_rule_ch}")
-                st.rerun()
-
-# List existing rules with remove buttons
-if _rules:
-    for _ch, _rule in list(_rules.items()):
-        _parts = []
-        if "min" in _rule:
-            _parts.append(f"min {_rule['min']}")
-        if "max" in _rule:
-            _parts.append(f"max {_rule['max']}")
-        _rcol1, _rcol2 = st.sidebar.columns([3, 1])
-        _rcol1.caption(f"**{_ch}**: {' · '.join(_parts)}")
-        if _rcol2.button("✕", key=f"del_rule_{_ch}"):
-            del _rules[_ch]
-            cfg["channel_rules"] = _rules
-            save_config(cfg)
-            st.rerun()
-else:
-    st.sidebar.caption("No rules set yet.")
 
 # ── Overlay chart helper (defined here so it's available throughout dashboard) ─
 def make_overlay_chart(channels, title, time_col, df_view, t_range, mode, height,
@@ -1764,22 +2128,27 @@ if _LOGO_SRC:
 else:
     st.markdown("## 🏁 RaceFusion")
 
-st.caption(f"Run: **{csv_name}**")
+_run_display_name = _run_label(csv_name, run) if csv_name.endswith(".run") else csv_name
+st.caption(f"Run: **{_run_display_name}**")
 
 if not _csv_available:
-    st.caption("ℹ️ No CSV data for this run — channel charts unavailable.")
-else:
-    # Live run — show prominent Save & Close banner
-    _sc_col1, _sc_col2 = st.columns([5, 2])
-    _sc_col1.markdown("")   # spacer so button aligns nicely
-    if _sc_col2.button("✅ Save & Close Run", use_container_width=True, type="primary",
-                       key="save_close_btn",
-                       help="Saves all run data and returns to upload screen for the next run"):
-        # Just reset the UI — keep CSV, timeslip image, and JSON all intact
-        st.session_state["_uploader_gen"] = st.session_state.get("_uploader_gen", 0) + 1
-        st.session_state.pop("_last_uploaded_csv", None)   # allow clean re-upload of same filename
-        st.session_state["_reset_selector"] = True
-        st.rerun()
+    if csv_name.endswith(".run"):
+        st.caption("🎫 Timeslip-only run — upload a timeslip photo in the sidebar to get started.")
+    else:
+        st.caption("ℹ️ No CSV data for this run — channel charts unavailable.")
+
+# Save & Close button — always visible when a run is active, regardless of CSV
+st.markdown("<div style='margin-top:24px'></div>", unsafe_allow_html=True)
+_sc_col1, _sc_col2 = st.columns([5, 2])
+_sc_col1.markdown("")   # spacer so button aligns nicely
+if _sc_col2.button("✅ Save & Close Run", use_container_width=True, type="primary",
+                   key="save_close_btn",
+                   help="Saves all run data and returns to upload screen for the next run"):
+    # Just reset the UI — keep CSV, timeslip image, and JSON all intact
+    st.session_state["upload_gen"] += 1
+    st.session_state.pop("_last_uploaded_csv", None)   # allow clean re-upload of same filename
+    st.session_state["_reset_selector"] = True
+    st.rerun()
 
 # ── Summary row ───────────────────────────────────────────────────────────────
 # Pull timeslip values for ET / MPH / RWHP when available; fall back to CSV
@@ -1843,98 +2212,103 @@ st.markdown("---")
 _main_left, _main_right = st.columns(2)
 
 # ── Left: Run Details form ────────────────────────────────────────────────────
+# Wrapped in st.form so that typing in number/text fields does NOT trigger a
+# full page rerun — only the submit buttons do.  This keeps active_run_id stable
+# while the user edits values.
 with _main_left:
     with st.expander("📋 Run Details", expanded=False):
-        st.caption("**Tire Pressures (psi)**")
-        _rd_col1, _rd_col2 = st.columns(2)
-        # All widget keys include csv_name so values reset correctly when switching runs
-        _rk = csv_name  # shorthand
-        _rd_tire_fl = _rd_col1.number_input("FL", min_value=0.0, max_value=60.0,
-                        value=float(_rd.get("tire_pressure_fl", 0.0)), step=0.5, format="%.1f", key=f"rd_fl_{_rk}")
-        _rd_tire_fr = _rd_col2.number_input("FR", min_value=0.0, max_value=60.0,
-                        value=float(_rd.get("tire_pressure_fr", 0.0)), step=0.5, format="%.1f", key=f"rd_fr_{_rk}")
-        _rd_tire_rl = _rd_col1.number_input("RL", min_value=0.0, max_value=60.0,
-                        value=float(_rd.get("tire_pressure_rl", 0.0)), step=0.5, format="%.1f", key=f"rd_rl_{_rk}")
-        _rd_tire_rr = _rd_col2.number_input("RR", min_value=0.0, max_value=60.0,
-                        value=float(_rd.get("tire_pressure_rr", 0.0)), step=0.5, format="%.1f", key=f"rd_rr_{_rk}")
+        _rk = csv_name  # widget key shorthand — scoped to run so values reset on switch
+        with st.form(f"run_details_form_{_rk}"):
+            st.caption("**Tire Pressures (psi)**")
+            _rd_col1, _rd_col2 = st.columns(2)
+            _rd_tire_fl = _rd_col1.number_input("FL", min_value=0.0, max_value=60.0,
+                            value=float(_rd.get("tire_pressure_fl", 0.0)), step=0.5, format="%.1f", key=f"rd_fl_{_rk}")
+            _rd_tire_fr = _rd_col2.number_input("FR", min_value=0.0, max_value=60.0,
+                            value=float(_rd.get("tire_pressure_fr", 0.0)), step=0.5, format="%.1f", key=f"rd_fr_{_rk}")
+            _rd_tire_rl = _rd_col1.number_input("RL", min_value=0.0, max_value=60.0,
+                            value=float(_rd.get("tire_pressure_rl", 0.0)), step=0.5, format="%.1f", key=f"rd_rl_{_rk}")
+            _rd_tire_rr = _rd_col2.number_input("RR", min_value=0.0, max_value=60.0,
+                            value=float(_rd.get("tire_pressure_rr", 0.0)), step=0.5, format="%.1f", key=f"rd_rr_{_rk}")
 
-        st.caption("**Track / Tire Conditions**")
-        _rd_col3, _rd_col4 = st.columns(2)
-        _rd_track_temp = _rd_col3.number_input("Track Temp (°F)", min_value=-20.0, max_value=200.0,
-                        value=float(_rd.get("track_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_track_temp_{_rk}")
-        _rd_tire_temp = _rd_col4.number_input("Tire Temp (°F)", min_value=0.0, max_value=300.0,
-                        value=float(_rd.get("tire_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_tire_temp_{_rk}")
+            st.caption("**Track / Tire Conditions**")
+            _rd_col3, _rd_col4 = st.columns(2)
+            _rd_track_temp = _rd_col3.number_input("Track Temp (°F)", min_value=-20.0, max_value=200.0,
+                            value=float(_rd.get("track_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_track_temp_{_rk}")
+            _rd_tire_temp = _rd_col4.number_input("Tire Temp (°F)", min_value=0.0, max_value=300.0,
+                            value=float(_rd.get("tire_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_tire_temp_{_rk}")
 
-        st.caption("**RPM**")
-        _rd_col5, _rd_col6 = st.columns(2)
-        _rd_launch_rpm  = _rd_col5.number_input("Launch RPM", min_value=0, max_value=15000,
-                        value=int(_rd.get("launch_rpm", 0)), step=100, key=f"rd_launch_rpm_{_rk}")
-        _rd_shift_point = _rd_col6.number_input("Shift Point", min_value=0, max_value=15000,
-                        value=int(_rd.get("shift_point", 0)), step=100, key=f"rd_shift_{_rk}")
+            st.caption("**RPM**")
+            _rd_col5, _rd_col6 = st.columns(2)
+            _rd_launch_rpm  = _rd_col5.number_input("Launch RPM", min_value=0, max_value=15000,
+                            value=int(_rd.get("launch_rpm", 0)), step=100, key=f"rd_launch_rpm_{_rk}")
+            _rd_shift_point = _rd_col6.number_input("Shift Point", min_value=0, max_value=15000,
+                            value=int(_rd.get("shift_point", 0)), step=100, key=f"rd_shift_{_rk}")
 
-        st.caption("**Fuel System**")
-        _rd_col7, _rd_col8 = st.columns(2)
-        _rd_main_jet    = _rd_col7.number_input("Main Jet", min_value=0.0, max_value=999.0,
-                        value=float(_rd.get("main_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_main_jet_{_rk}")
-        _rd_hs_jet      = _rd_col8.number_input("HS Jet", min_value=0.0, max_value=999.0,
-                        value=float(_rd.get("hs_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_hs_jet_{_rk}")
-        _rd_hs_open_psi = _rd_col7.number_input("HS Open PSI", min_value=0.0, max_value=500.0,
-                        value=float(_rd.get("hs_open_psi", 0.0)), step=1.0, format="%.0f", key=f"rd_hs_psi_{_rk}")
+            st.caption("**Fuel System**")
+            _rd_col7, _rd_col8 = st.columns(2)
+            _rd_main_jet    = _rd_col7.number_input("Main Jet", min_value=0.0, max_value=999.0,
+                            value=float(_rd.get("main_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_main_jet_{_rk}")
+            _rd_hs_jet      = _rd_col8.number_input("HS Jet", min_value=0.0, max_value=999.0,
+                            value=float(_rd.get("hs_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_hs_jet_{_rk}")
+            _rd_hs_open_psi = _rd_col7.number_input("HS Open PSI", min_value=0.0, max_value=500.0,
+                            value=float(_rd.get("hs_open_psi", 0.0)), step=1.0, format="%.0f", key=f"rd_hs_psi_{_rk}")
 
-        st.caption("**Blower**")
-        _rd_col9, _rd_col10 = st.columns(2)
-        _rd_top_pulley  = _rd_col9.number_input("Top Pulley", min_value=0, max_value=100,
-                        value=int(_rd.get("top_pulley", 0)), step=1, key=f"rd_top_pulley_{_rk}")
-        _rd_bot_pulley  = _rd_col10.number_input("Bottom Pulley", min_value=0, max_value=100,
-                        value=int(_rd.get("bottom_pulley", 0)), step=1, key=f"rd_bot_pulley_{_rk}")
-        _rd_overdrive   = ((_rd_bot_pulley / _rd_top_pulley) - 1) if _rd_top_pulley else 0.0
-        _rd_col9.caption(f"Overdrive: **{_rd_overdrive * 100:.2f}%**")
-        _rd_max_boost   = _rd_col10.number_input("Max Boost (psi)", min_value=0.0, max_value=100.0,
-                        value=float(_rd.get("max_boost", 0.0)), step=0.5, format="%.2f", key=f"rd_max_boost_{_rk}")
-        _rd_col11, _rd_col12 = st.columns(2)
-        _rd_wb_d = _rd_col11.number_input("Wheelie Bar – D", min_value=0.0, max_value=10.0,
-                        value=float(_rd.get("wheelie_bar_d", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_d_{_rk}")
-        _rd_wb_p = _rd_col12.number_input("Wheelie Bar – P", min_value=0.0, max_value=10.0,
-                        value=float(_rd.get("wheelie_bar_p", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_p_{_rk}")
+            st.caption("**Blower**")
+            _rd_col9, _rd_col10 = st.columns(2)
+            _rd_top_pulley  = _rd_col9.number_input("Top Pulley", min_value=0, max_value=100,
+                            value=int(_rd.get("top_pulley", 0)), step=1, key=f"rd_top_pulley_{_rk}")
+            _rd_bot_pulley  = _rd_col10.number_input("Bottom Pulley", min_value=0, max_value=100,
+                            value=int(_rd.get("bottom_pulley", 0)), step=1, key=f"rd_bot_pulley_{_rk}")
+            _rd_overdrive   = ((_rd_bot_pulley / _rd_top_pulley) - 1) if _rd_top_pulley else 0.0
+            _rd_col9.caption(f"Overdrive: **{_rd_overdrive * 100:.2f}%**")
+            _rd_col11, _rd_col12 = st.columns(2)
+            _rd_wb_d = _rd_col11.number_input("Wheelie Bar – D", min_value=0.0, max_value=10.0,
+                            value=float(_rd.get("wheelie_bar_d", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_d_{_rk}")
+            _rd_wb_p = _rd_col12.number_input("Wheelie Bar – P", min_value=0.0, max_value=10.0,
+                            value=float(_rd.get("wheelie_bar_p", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_p_{_rk}")
 
-        st.caption("**Ignition**")
-        _rd_spark_plug = st.text_input("Spark Plug", value=_rd.get("spark_plug", ""),
-                        placeholder="e.g. NGK-R-5671-11", key=f"rd_spark_plug_{_rk}")
-        _rd_col13, _rd_col14 = st.columns(2)
-        _rd_plug_gap   = _rd_col13.text_input("Plug Gap", value=_rd.get("plug_gap", ""),
-                        placeholder='0.016"', key=f"rd_plug_gap_{_rk}")
-        _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash", ""),
-                        placeholder='0.016"/0.016"', key=f"rd_valve_lash_{_rk}")
+            st.caption("**Ignition**")
+            _rd_spark_plug = st.text_input("Spark Plug", value=_rd.get("spark_plug", ""),
+                            placeholder="e.g. NGK-R-5671-11", key=f"rd_spark_plug_{_rk}")
+            _rd_col13, _rd_col14 = st.columns(2)
+            _rd_plug_gap   = _rd_col13.text_input("Plug Gap", value=_rd.get("plug_gap", ""),
+                            placeholder='0.016"', key=f"rd_plug_gap_{_rk}")
+            _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash", ""),
+                            placeholder='0.016"/0.016"', key=f"rd_valve_lash_{_rk}")
 
-        _rd_notes = st.text_area("Run notes", value=_rd.get("notes", ""),
-                        placeholder="e.g. First pass of day, track freshly prepped...", height=70,
-                        key=f"rd_notes_{_rk}")
+            _rd_notes = st.text_area("Run notes", value=_rd.get("notes", ""),
+                            placeholder="e.g. First pass of day, track freshly prepped...", height=70,
+                            key=f"rd_notes_{_rk}")
 
-        _rd_payload = {
-            "tire_pressure_fl": _rd_tire_fl,  "tire_pressure_fr": _rd_tire_fr,
-            "tire_pressure_rl": _rd_tire_rl,  "tire_pressure_rr": _rd_tire_rr,
-            "track_temp_f":     _rd_track_temp, "tire_temp_f":    _rd_tire_temp,
-            "launch_rpm":       _rd_launch_rpm,  "shift_point":   _rd_shift_point,
-            "main_jet":         _rd_main_jet,    "hs_jet":        _rd_hs_jet,
-            "hs_open_psi":      _rd_hs_open_psi,
-            "top_pulley":       _rd_top_pulley,  "bottom_pulley": _rd_bot_pulley,
-            "overdrive":        _rd_overdrive,   "max_boost":     _rd_max_boost,
-            "wheelie_bar_d":    _rd_wb_d,        "wheelie_bar_p": _rd_wb_p,
-            "spark_plug":       _rd_spark_plug,  "plug_gap":      _rd_plug_gap,
-            "valve_lash":       _rd_valve_lash,  "notes":         _rd_notes,
-        }
-        _btn_col1, _btn_col2 = st.columns(2)
-        if _btn_col1.button("💾 Save Run Details"):
+            _rd_payload = {
+                "tire_pressure_fl": _rd_tire_fl,  "tire_pressure_fr": _rd_tire_fr,
+                "tire_pressure_rl": _rd_tire_rl,  "tire_pressure_rr": _rd_tire_rr,
+                "track_temp_f":     _rd_track_temp, "tire_temp_f":    _rd_tire_temp,
+                "launch_rpm":       _rd_launch_rpm,  "shift_point":   _rd_shift_point,
+                "main_jet":         _rd_main_jet,    "hs_jet":        _rd_hs_jet,
+                "hs_open_psi":      _rd_hs_open_psi,
+                "top_pulley":       _rd_top_pulley,  "bottom_pulley": _rd_bot_pulley,
+                "overdrive":        _rd_overdrive,
+                "wheelie_bar_d":    _rd_wb_d,        "wheelie_bar_p": _rd_wb_p,
+                "spark_plug":       _rd_spark_plug,  "plug_gap":      _rd_plug_gap,
+                "valve_lash":       _rd_valve_lash,  "notes":         _rd_notes,
+            }
+            _btn_col1, _btn_col2 = st.columns(2)
+            _rd_save        = _btn_col1.form_submit_button("💾 Save Run Details",    use_container_width=True, type="secondary")
+            _rd_car_profile = _btn_col2.form_submit_button("🚗 Save as Car Profile",
+                                help="Pre-fills Run Details for all future runs",    use_container_width=True, type="secondary")
+
+        # Handlers run outside the form context (after the with block) so they
+        # fire only on actual submit clicks — never on field changes.
+        if _rd_save:
             run["run_details"] = _rd_payload
             save_run(csv_name, run)
-            _rd = run["run_details"]
             st.success("Run details saved!")
-        if _btn_col2.button("🚗 Save as Car Profile", help="Pre-fills Run Details for all future runs"):
+        if _rd_car_profile:
             run["run_details"] = _rd_payload
             save_run(csv_name, run)
             cfg["car_profile"] = {k: v for k, v in _rd_payload.items() if k != "notes"}
             save_config(cfg)
-            _rd = run["run_details"]
             st.success("Car Profile updated! Future runs will pre-fill from this.")
 
 # ── Right: Changelog ──────────────────────────────────────────────────────────
@@ -2155,8 +2529,11 @@ def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list
 
 _ai_system = """\
 You are a seasoned drag racing crew chief with 20+ years running supercharged bracket and heads-up cars. \
-You have the driver's RacePak channel data, timeslip splits, weather, changelog, and a full mechanical spec sheet for the car. \
-Think like a working tuner — specific numbers, direct cause-and-effect. If the data supports a claim, make it. If data is missing, say so.
+You work with whatever data the driver has — timeslip splits, weather, RacePak channel data, changelog, and car specs. \
+Not every driver has a data acquisition system. If channel_stats and key_traces are empty, that means no RacePak data is available for this run — \
+skip the Channel Analysis section entirely and note at the end that adding a RacePak data logger would enable deeper analysis. \
+Never refuse to analyze or say the data is insufficient — work with what is there and deliver maximum value from timeslip splits, weather, and run history. \
+Think like a working tuner — specific numbers, direct cause-and-effect. If the data supports a claim, make it. If data is missing, say so and move on.
 
 Respond in these exact sections, in order:
 
@@ -2184,6 +2561,7 @@ did it help, hurt, or show no measurable effect? Cite specific split or channel 
 If changelog is empty, say so.
 
 ## Channel Analysis
+(Skip this section entirely if no RacePak channel data is present — channel_stats and key_traces will be empty.)
 Work through the RacePak data systematically:
 - **EGTs**: Compute average EGT across all cylinders. Flag any cylinder more than ~75°F above average (lean) or below average (rich/misfire).
 - **Boost**: Peak value, time to peak, any top-end falloff. For a roots blower, boost should rise and hold — late falloff can indicate belt slip or insufficient carb capacity. For a screw, expect a sharper initial spike.
@@ -2420,10 +2798,9 @@ _rd_saved = run.get("run_details", {})
 _has_run_details = any(_rd_saved.get(k) for k in ("tire_pressure_fl","track_temp_f",
                                                     "launch_rpm","notes"))
 
-if _has_car_profile or _has_run_details:
-    _pc1, _pc2 = st.columns(2)
+_pc1, _pc2 = st.columns(2)
 
-    if _has_car_profile:
+if _has_car_profile:
         with _pc1:
             _blower_parts = list(filter(None, [
                 cfg.get("blower_size", ""),
@@ -2466,41 +2843,42 @@ if _has_car_profile or _has_run_details:
   <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{_profile_rows}</table>
 </div>""", unsafe_allow_html=True)
 
-    if _has_run_details:
-        with _pc2:
-            _tfl = _rd_saved.get("tire_pressure_fl", 0)
-            _tfr = _rd_saved.get("tire_pressure_fr", 0)
-            _trl = _rd_saved.get("tire_pressure_rl", 0)
-            _trr = _rd_saved.get("tire_pressure_rr", 0)
-            _tt  = _rd_saved.get("track_temp_f", 0)
-            _lrpm = _rd_saved.get("launch_rpm", 0)
-            _rnotes = _rd_saved.get("notes", "")
+with _pc2:
+    _tfl    = _rd_saved.get("tire_pressure_fl", 0)
+    _tfr    = _rd_saved.get("tire_pressure_fr", 0)
+    _trl    = _rd_saved.get("tire_pressure_rl", 0)
+    _trr    = _rd_saved.get("tire_pressure_rr", 0)
+    _tt     = _rd_saved.get("track_temp_f", 0)
+    _lrpm   = _rd_saved.get("launch_rpm", 0)
+    _rnotes = _rd_saved.get("notes", "")
+    _shift_pt = int(_rd_saved.get("shift_point", 0))
 
-            _shift_pt = int(_rd_saved.get("shift_point", 0))
-
-            _rd_rows = ""
-            if _tfl or _tfr:
-                _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (F)</td>'
-                             f'<td style="color:#eee;text-align:right;">L {_tfl:.1f} · R {_tfr:.1f} psi</td></tr>')
-            if _trl or _trr:
-                _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (R)</td>'
-                             f'<td style="color:#eee;text-align:right;">L {_trl:.1f} · R {_trr:.1f} psi</td></tr>')
-            if _tt:
-                _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Track Temp</td>'
-                             f'<td style="color:#eee;text-align:right;">{_tt:.0f} °F</td></tr>')
-            if _lrpm:
-                _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Launch RPM</td>'
-                             f'<td style="color:#eee;text-align:right;">{_lrpm:,}</td></tr>')
-            if _shift_pt:
-                _rd_rows += (
-                    f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Shift Point</td>'
-                    f'<td style="color:#cc1111;font-weight:700;text-align:right;">{_shift_pt:,} RPM</td></tr>'
-                )
-            _notes_html = ""
-            if _rnotes:
-                _notes_html = (f'<div style="margin-top:10px;color:#aaa;font-size:0.82rem;'
-                               f'border-top:1px solid #2a0000;padding-top:8px;">{_rnotes}</div>')
-            st.markdown(f"""
+    _rd_rows = ""
+    if _tfl or _tfr:
+        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (F)</td>'
+                     f'<td style="color:#eee;text-align:right;">L {_tfl:.1f} · R {_tfr:.1f} psi</td></tr>')
+    if _trl or _trr:
+        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Tire Press (R)</td>'
+                     f'<td style="color:#eee;text-align:right;">L {_trl:.1f} · R {_trr:.1f} psi</td></tr>')
+    if _tt:
+        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Track Temp</td>'
+                     f'<td style="color:#eee;text-align:right;">{_tt:.0f} °F</td></tr>')
+    if _lrpm:
+        _rd_rows += (f'<tr><td style="color:#888;padding:3px 8px 3px 0;">Launch RPM</td>'
+                     f'<td style="color:#eee;text-align:right;">{_lrpm:,}</td></tr>')
+    if _shift_pt:
+        _rd_rows += (
+            f'<tr><td style="color:#888;padding:2px 8px 2px 0;">Shift Point</td>'
+            f'<td style="color:#cc1111;font-weight:700;text-align:right;">{_shift_pt:,} RPM</td></tr>'
+        )
+    if not _rd_rows:
+        _rd_rows = ('<tr><td colspan="2" style="color:#555;font-style:italic;padding:4px 0;">'
+                    'No details saved yet — open Run Details above to add some.</td></tr>')
+    _notes_html = ""
+    if _rnotes:
+        _notes_html = (f'<div style="margin-top:10px;color:#aaa;font-size:0.82rem;'
+                       f'border-top:1px solid #2a0000;padding-top:8px;">{_rnotes}</div>')
+    st.markdown(f"""
 <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
   background:#0a0a0a;font-family:monospace;">
   <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
@@ -2511,7 +2889,7 @@ if _has_car_profile or _has_run_details:
   {_notes_html}
 </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
+st.markdown("---")
 
 # ── Timeslip + Weather cards ──────────────────────────────────────────────────
 slip = run.get("timeslip")
@@ -3021,7 +3399,6 @@ with _t2:
         ("Bottom Pulley", _fmt(_sum_bp, "{:.0f}")),
         ("Overdrive",     f"{_sum_od * 100:.2f}%" if _sum_tp else "—"),
         ("Peak Boost",    _fmt(_sum_boost, "{:.1f} psi") + " ⚡" if _sum_boost else "—"),
-        ("Max Boost",     _fmt(_sum_rd.get("max_boost"),     "{:.2f} psi")),
         ("W/B – D",       _fmt(_sum_rd.get("wheelie_bar_d"), "{:.3f}\"")),
         ("W/B – P",       _fmt(_sum_rd.get("wheelie_bar_p"), "{:.3f}\"")),
     ]
@@ -3123,7 +3500,6 @@ def _build_export_row(filename: str, rec: dict) -> dict:
         "top_pulley":     _rd.get("top_pulley",      ""),
         "bottom_pulley":  _rd.get("bottom_pulley",   ""),
         "overdrive":      _rd.get("overdrive",       ""),
-        "max_boost":      _rd.get("max_boost",       ""),
         "wheelie_bar_d":  _rd.get("wheelie_bar_d",   ""),
         "wheelie_bar_p":  _rd.get("wheelie_bar_p",   ""),
         "front_tire_psi": _rd.get("tire_pressure_fl",""),
