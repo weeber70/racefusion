@@ -1669,6 +1669,93 @@ if st.sidebar.button("Save location"):
 if cfg.get("location_label"):
     st.sidebar.caption(f"📍 {cfg['location_label']}")
 
+# ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
+_admin_user = st.session_state.get("rf_user", "")
+print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys.stderr, flush=True)
+if _admin_user == "weeber70" and _sb:
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("🔒 Admin Panel", expanded=False):
+
+        def _time_ago(ts_str: str) -> str:
+            if not ts_str:
+                return "never"
+            try:
+                from datetime import datetime, timezone
+                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
+                if _s < 60:    return f"{_s}s ago"
+                if _s < 3600:  return f"{_s // 60}m ago"
+                if _s < 86400: return f"{_s // 3600}h ago"
+                return f"{_s // 86400}d ago"
+            except Exception:
+                return ts_str
+
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            _ten_ago      = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
+            _active_count = len(_active_rows)
+
+            _cred_res    = _sb.table("credentials").select("username", count="exact").execute()
+            _total_users = _cred_res.count or len(_cred_res.data)
+
+            _runs_res    = _sb.table("runs").select("username", count="exact").execute()
+            _total_runs  = _runs_res.count or len(_runs_res.data)
+
+            try:
+                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
+                _total_slip = _slip_res.count or 0
+            except Exception:
+                _total_slip = "—"
+
+            _a1, _a2 = st.columns(2)
+            _a1.metric("Active now",        _active_count)
+            _a2.metric("Accounts",          _total_users)
+            _b1, _b2 = st.columns(2)
+            _b1.metric("Runs logged",       _total_runs)
+            _b2.metric("Timeslips scanned", _total_slip)
+
+            st.markdown("---")
+
+            _all_creds    = _sb.table("credentials").select("username").execute().data
+            _all_sessions = {r["username"]: r["last_seen"]
+                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
+            _run_rows     = _runs_res.data or _sb.table("runs").select("username").execute().data
+            _run_counts   = {}
+            for _rr in _run_rows:
+                _u = _rr.get("username", "")
+                _run_counts[_u] = _run_counts.get(_u, 0) + 1
+
+            _rows_html = ""
+            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
+                _un  = _cu["username"]
+                _ls  = _time_ago(_all_sessions.get(_un, ""))
+                _rc  = _run_counts.get(_un, 0)
+                _bold = "font-weight:700;" if _un == "weeber70" else ""
+                _rows_html += (
+                    f'<tr>'
+                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
+                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
+                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
+                    f'</tr>'
+                )
+
+            st.markdown(f"""
+<div style="font-size:0.82rem;font-family:monospace;">
+<table style="width:100%;border-collapse:collapse;">
+<thead><tr>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
+  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
+</tr></thead>
+<tbody>{_rows_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+
+        except Exception as _admin_err:
+            st.warning(f"Admin data unavailable: {_admin_err}")
+
 # ── Main area ─────────────────────────────────────────────────────────────────
 print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
 if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
@@ -1899,101 +1986,6 @@ if _rules:
             st.rerun()
 else:
     st.sidebar.caption("No rules set yet.")
-
-# ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
-_admin_user = st.session_state.get("rf_user", "")
-print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys.stderr, flush=True)
-if _admin_user == "weeber70" and _sb:
-    st.sidebar.markdown("---")
-    st.sidebar.write("🔒 Admin panel loading…")  # DEBUG placeholder — remove once confirmed visible
-    with st.sidebar.expander("🔒 Admin Panel", expanded=False):
-
-        def _time_ago(ts_str: str) -> str:
-            if not ts_str:
-                return "never"
-            try:
-                from datetime import datetime, timezone
-                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
-                if _s < 60:    return f"{_s}s ago"
-                if _s < 3600:  return f"{_s // 60}m ago"
-                if _s < 86400: return f"{_s // 3600}h ago"
-                return f"{_s // 86400}d ago"
-            except Exception:
-                return ts_str
-
-        try:
-            from datetime import datetime, timezone, timedelta
-
-            # ── Active now (last 10 min) ──────────────────────────────────────
-            _ten_ago = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
-            _active_count = len(_active_rows)
-
-            # ── Total accounts ────────────────────────────────────────────────
-            _cred_res     = _sb.table("credentials").select("username", count="exact").execute()
-            _total_users  = _cred_res.count or len(_cred_res.data)
-
-            # ── Total runs ────────────────────────────────────────────────────
-            _runs_res     = _sb.table("runs").select("username", count="exact").execute()
-            _total_runs   = _runs_res.count or len(_runs_res.data)
-
-            # ── Total timeslips scanned ───────────────────────────────────────
-            try:
-                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
-                _total_slip = _slip_res.count or 0
-            except Exception:
-                _total_slip = "—"
-
-            # ── Summary metrics ───────────────────────────────────────────────
-            _a1, _a2 = st.columns(2)
-            _a1.metric("Active now",       _active_count)
-            _a2.metric("Accounts",         _total_users)
-            _b1, _b2 = st.columns(2)
-            _b1.metric("Runs logged",      _total_runs)
-            _b2.metric("Timeslips scanned",_total_slip)
-
-            st.markdown("---")
-
-            # ── Per-user table ────────────────────────────────────────────────
-            _all_creds   = _sb.table("credentials").select("username").execute().data
-            _all_sessions = {r["username"]: r["last_seen"]
-                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
-            _run_rows    = (_runs_res.data or
-                            _sb.table("runs").select("username").execute().data)
-            _run_counts  = {}
-            for _rr in _run_rows:
-                _u = _rr.get("username", "")
-                _run_counts[_u] = _run_counts.get(_u, 0) + 1
-
-            _rows_html = ""
-            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
-                _un  = _cu["username"]
-                _ls  = _time_ago(_all_sessions.get(_un, ""))
-                _rc  = _run_counts.get(_un, 0)
-                _bold = "font-weight:700;" if _un == "weeber70" else ""
-                _rows_html += (
-                    f'<tr>'
-                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
-                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
-                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
-                    f'</tr>'
-                )
-
-            st.markdown(f"""
-<div style="font-size:0.82rem;font-family:monospace;">
-<table style="width:100%;border-collapse:collapse;">
-<thead><tr>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
-  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
-</tr></thead>
-<tbody>{_rows_html}</tbody>
-</table>
-</div>""", unsafe_allow_html=True)
-
-        except Exception as _admin_err:
-            st.warning(f"Admin data unavailable: {_admin_err}")
 
 # ── Load or init run record ───────────────────────────────────────────────────
 run = load_run(csv_name)
