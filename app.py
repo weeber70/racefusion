@@ -2242,7 +2242,28 @@ if not _csv_available:
 # Save & Close button — always visible when a run is active, regardless of CSV
 st.markdown("<div style='margin-top:24px'></div>", unsafe_allow_html=True)
 _sc_col1, _sc_col2 = st.columns([5, 2])
-_sc_col1.markdown("")   # spacer so button aligns nicely
+
+# Feedback mailto link in left column
+import urllib.parse as _urlparse
+_fb_subject = _urlparse.quote(f"RaceFusion Feedback – {_current_user}")
+_fb_body    = _urlparse.quote(
+    f"Username: {_current_user}\n\n"
+    f"What were you doing when the issue occurred?\n\n\n"
+    f"What happened?\n\n\n"
+    f"What did you expect to happen?\n"
+)
+_fb_href = f"mailto:chris@weebenterprises.com?subject={_fb_subject}&body={_fb_body}"
+_sc_col1.markdown(
+    f'<a href="{_fb_href}" style="'
+    f'display:inline-block;padding:6px 14px;font-size:0.82rem;'
+    f'background:#1a1a24;color:#888;border:1px solid #2a2a3a;border-radius:6px;'
+    f'text-decoration:none;line-height:1.6;'
+    f'" onmouseover="this.style.borderColor=\'#cc1111\';this.style.color=\'#ccc\'"'
+    f' onmouseout="this.style.borderColor=\'#2a2a3a\';this.style.color=\'#888\'">'
+    f'📧 Send Feedback</a>',
+    unsafe_allow_html=True,
+)
+
 if _sc_col2.button("✅ Save & Close Run", use_container_width=True, type="primary",
                    key="save_close_btn",
                    help="Saves all run data and returns to upload screen for the next run"):
