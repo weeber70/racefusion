@@ -1031,6 +1031,49 @@ if "dark_mode" not in st.session_state:
 _dark_mode = st.session_state["dark_mode"]
 _inject_theme(_dark_mode)
 
+# ── Feedback button — fixed top-right, always visible ────────────────────────
+import urllib.parse as _urlparse
+_fb_subject = _urlparse.quote(f"RaceFusion Feedback – {_current_user}")
+_fb_body    = _urlparse.quote(
+    f"Username: {_current_user}\n\n"
+    f"What were you doing when the issue occurred?\n\n\n"
+    f"What happened?\n\n\n"
+    f"What did you expect to happen?\n"
+)
+_fb_href = f"mailto:chris@weebenterprises.com?subject={_fb_subject}&body={_fb_body}"
+_fb_bg    = "#1a1a24" if _dark_mode else "#f0f0f5"
+_fb_color = "#888"    if _dark_mode else "#666"
+_fb_border= "#2a2a3a" if _dark_mode else "#d0d0d8"
+st.markdown(f"""
+<style>
+#rf-feedback-btn {{
+    position: fixed;
+    top: 14px;
+    right: 18px;
+    z-index: 99999;
+}}
+#rf-feedback-btn a {{
+    display: inline-block;
+    padding: 5px 12px;
+    font-size: 0.78rem;
+    background: {_fb_bg};
+    color: {_fb_color};
+    border: 1px solid {_fb_border};
+    border-radius: 6px;
+    text-decoration: none;
+    font-family: sans-serif;
+    transition: border-color 0.15s, color 0.15s;
+}}
+#rf-feedback-btn a:hover {{
+    border-color: #cc1111;
+    color: #ffffff;
+}}
+</style>
+<div id="rf-feedback-btn">
+  <a href="{_fb_href}">📧 Send Feedback</a>
+</div>
+""", unsafe_allow_html=True)
+
 # ── Dropdown hover fix (JS MutationObserver via components.html) ──────────────
 # st.markdown strips <script> tags; components.html actually executes JS.
 # Targets window.parent.document so it can reach the Streamlit app DOM.
@@ -2242,28 +2285,7 @@ if not _csv_available:
 # Save & Close button — always visible when a run is active, regardless of CSV
 st.markdown("<div style='margin-top:24px'></div>", unsafe_allow_html=True)
 _sc_col1, _sc_col2 = st.columns([5, 2])
-
-# Feedback mailto link in left column
-import urllib.parse as _urlparse
-_fb_subject = _urlparse.quote(f"RaceFusion Feedback – {_current_user}")
-_fb_body    = _urlparse.quote(
-    f"Username: {_current_user}\n\n"
-    f"What were you doing when the issue occurred?\n\n\n"
-    f"What happened?\n\n\n"
-    f"What did you expect to happen?\n"
-)
-_fb_href = f"mailto:chris@weebenterprises.com?subject={_fb_subject}&body={_fb_body}"
-_sc_col1.markdown(
-    f'<a href="{_fb_href}" style="'
-    f'display:inline-block;padding:6px 14px;font-size:0.82rem;'
-    f'background:#1a1a24;color:#888;border:1px solid #2a2a3a;border-radius:6px;'
-    f'text-decoration:none;line-height:1.6;'
-    f'" onmouseover="this.style.borderColor=\'#cc1111\';this.style.color=\'#ccc\'"'
-    f' onmouseout="this.style.borderColor=\'#2a2a3a\';this.style.color=\'#888\'">'
-    f'📧 Send Feedback</a>',
-    unsafe_allow_html=True,
-)
-
+_sc_col1.markdown("")  # spacer
 if _sc_col2.button("✅ Save & Close Run", use_container_width=True, type="primary",
                    key="save_close_btn",
                    help="Saves all run data and returns to upload screen for the next run"):
