@@ -960,13 +960,8 @@ def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pres
 
 # ── Race Day Predictor helpers ────────────────────────────────────────────────
 
-def fetch_current_weather(lat: float, lon: float) -> dict:
-    """Fetch live conditions from Open-Meteo forecast API (not archive).
-
-    Uses forecast API with real-time data assimilation (forecast_days=1)
-    for better accuracy than ERA5 reanalysis on current conditions.
-    Variable names match current Open-Meteo API convention with legacy fallbacks.
-    """
+def _fetch_omw_current(lat: float, lon: float) -> dict:
+    """Open-Meteo forecast API — used as fallback when no METAR station is nearby."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude":         lat,
@@ -977,14 +972,123 @@ def fetch_current_weather(lat: float, lon: float) -> dict:
         "windspeed_unit":   "mph",
         "timezone":         "auto",
     }
-    r   = requests.get(url, params=params, timeout=15)
-    cur = r.json().get("current", {})
+    try:
+        r   = requests.get(url, params=params, timeout=15)
+        cur = r.json().get("current", {})
+        return {
+            "temperature_f": cur.get("temperature_2m"),
+            "humidity_pct":  cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m"),
+            "pressure_hpa":  cur.get("surface_pressure"),
+            "windspeed_mph": cur.get("wind_speed_10m") or cur.get("windspeed_10m"),
+            "_source":       "open-meteo",
+        }
+    except Exception:
+        return {"_source": "open-meteo"}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in km between two lat/lon points."""
+    import math
+    R  = 6371.0
+    φ1 = math.radians(lat1);  φ2 = math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lon2 - lon1)
+    a  = math.sin(dφ/2)**2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def fetch_metar(lat: float, lon: float) -> dict:
+    """Find the nearest METAR station and return current conditions.
+
+    Uses NOAA aviationweather.gov — free, no API key, real measured data
+    updated every ~hour.  Same source professional racing teams use.
+
+    Searches all stations within a ~150 nm bounding box, picks the nearest
+    one that has a complete report (temp + altimeter), and converts:
+      • temp/dewpoint → temperature_f and humidity_pct
+      • altimeter (QNH, inHg) → station pressure (hPa) via the standard
+        aviation barometric formula: P_stn = P_altim × (1−6.8753e-6·Z_ft)^5.2559
+
+    Falls back to Open-Meteo forecast API if no METAR is found.
+    """
+    import math
+    from datetime import datetime, timezone as _tz
+
+    # ── Search within ~150 nm bounding box ───────────────────────────────────
+    pad  = 2.5   # degrees ≈ 150 nm
+    bbox = f"{lat-pad:.2f},{lon-pad:.2f},{lat+pad:.2f},{lon+pad:.2f}"
+    stations: list = []
+    try:
+        _r = requests.get(
+            "https://aviationweather.gov/api/data/metar",
+            params={"bbox": bbox, "format": "json", "hoursBack": 2},
+            timeout=15,
+        )
+        if _r.ok:
+            stations = _r.json() or []
+    except Exception:
+        pass
+
+    # ── Pick nearest station with temp + altimeter ───────────────────────────
+    best: dict | None = None
+    best_dist: float  = float("inf")
+    for s in stations:
+        slat, slon = s.get("lat"), s.get("lon")
+        if None in (slat, slon):
+            continue
+        if s.get("temp") is None or s.get("altim") is None:
+            continue
+        d = _haversine_km(lat, lon, float(slat), float(slon))
+        if d < best_dist:
+            best_dist, best = d, s
+
+    if best is None:
+        return _fetch_omw_current(lat, lon)
+
+    # ── Parse fields ─────────────────────────────────────────────────────────
+    temp_c  = float(best["temp"])
+    dewp_c  = best.get("dewp")
+    altim   = float(best["altim"])          # inHg (QNH / altimeter setting)
+    elev_ft = float(best.get("elev") or 0) # station elevation, feet
+    icao    = best.get("icaoId") or best.get("id") or "???"
+    name    = (best.get("name") or icao).strip()
+    obs_ts  = best.get("obsTime")           # Unix timestamp
+    wspd_kt = best.get("wspd")
+
+    temp_f = temp_c * 9 / 5 + 32
+
+    # RH from dewpoint (Magnus formula)
+    if dewp_c is not None:
+        _e           = lambda t: math.exp(17.27 * float(t) / (float(t) + 237.3))
+        humidity_pct = min(100.0, 100.0 * _e(dewp_c) / _e(temp_c))
+    else:
+        humidity_pct = None
+
+    # Altimeter setting → station pressure (standard aviation barometric formula)
+    # P_stn (hPa) = P_altim_inHg × 33.8639 × (1 − 6.8753×10⁻⁶ × elev_ft)^5.2559
+    pressure_hpa = altim * 33.8639 * (1 - 6.8753e-6 * elev_ft) ** 5.2559
+
+    windspeed_mph = float(wspd_kt) * 1.15078 if wspd_kt is not None else None
+
+    # Format observation timestamp
+    obs_label = ""
+    if obs_ts:
+        try:
+            dt        = datetime.fromtimestamp(int(obs_ts), tz=_tz.utc)
+            obs_label = dt.strftime("%H:%M UTC")
+        except Exception:
+            obs_label = str(obs_ts)
+
     return {
-        "temperature_f": cur.get("temperature_2m"),
-        # Accept both current (relative_humidity_2m) and legacy (relativehumidity_2m) key names
-        "humidity_pct":  cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m"),
-        "pressure_hpa":  cur.get("surface_pressure"),
-        "windspeed_mph": cur.get("wind_speed_10m") or cur.get("windspeed_10m"),
+        "temperature_f":  temp_f,
+        "humidity_pct":   humidity_pct,
+        "pressure_hpa":   pressure_hpa,
+        "windspeed_mph":  windspeed_mph,
+        "_source":        "metar",
+        "_metar_icao":    icao,
+        "_metar_name":    name,
+        "_metar_obs":     obs_label,
+        "_metar_dist_km": round(best_dist, 1),
     }
 
 
@@ -1923,7 +2027,7 @@ if st.session_state.get("current_page") == "predictor":
         if st.session_state["rdp_weather"] is None:
             with st.spinner("Fetching current conditions…"):
                 try:
-                    st.session_state["rdp_weather"] = fetch_current_weather(float(_rdp_lat), float(_rdp_lon))
+                    st.session_state["rdp_weather"] = fetch_metar(float(_rdp_lat), float(_rdp_lon))
                 except Exception as _rdp_wx_err:
                     st.error(f"Weather fetch failed: {_rdp_wx_err}")
                     st.session_state["rdp_weather"] = {}
@@ -1936,6 +2040,18 @@ if st.session_state.get("current_page") == "predictor":
         _rc2.metric("💧 Humidity",      f"{_rdp_wx['humidity_pct']:.0f}%"               if _rdp_wx.get("humidity_pct")  is not None else "—")
         _rc3.metric("📊 Baro Pressure", f"{_rdp_wx['pressure_hpa'] * 0.02953:.2f} inHg" if _rdp_wx.get("pressure_hpa") is not None else "—")
         _rc4.metric("📐 Density Alt",   f"{_rdp_da:,.0f} ft"                             if _rdp_da is not None else "—")
+
+        # ── Data source attribution ────────────────────────────────────────────
+        if _rdp_wx.get("_source") == "metar":
+            _attr_icao = _rdp_wx.get("_metar_icao", "")
+            _attr_name = _rdp_wx.get("_metar_name", _attr_icao)
+            _attr_obs  = _rdp_wx.get("_metar_obs", "")
+            _attr_txt  = f"📡 Weather data: NOAA METAR · {_attr_name} ({_attr_icao})"
+            if _attr_obs:
+                _attr_txt += f" · Updated {_attr_obs}"
+            st.caption(f"<span style='color:#666;font-size:0.75rem;'>{_attr_txt}</span>", unsafe_allow_html=True)
+        elif _rdp_wx.get("_source") == "open-meteo":
+            st.caption("<span style='color:#666;font-size:0.75rem;'>📡 Weather data: Open-Meteo forecast (no METAR station found within 150 nm)</span>", unsafe_allow_html=True)
 
         st.markdown("---")
 
