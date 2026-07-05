@@ -783,12 +783,15 @@ def scan_timeslip(image_bytes: bytes, media_type: str, api_key: str, car_number:
     client = anthropic.Anthropic(api_key=api_key)
     b64 = base64.standard_b64encode(image_bytes).decode()
 
+    car_num = car_number.strip()
     car_hint = ""
-    if car_number.strip():
+    if car_num:
         car_hint = (
-            f"\n\nIMPORTANT: This timeslip image may contain data for multiple cars. "
-            f"Extract ONLY the row or entry for car number \"{car_number.strip()}\". "
-            f"Ignore any other car's data on the same slip."
+            f"\n\nThe user's car number is \"{car_num}\". "
+            f"If the slip shows two cars (Left lane and Right lane), extract only the timing data "
+            f"for car \"{car_num}\" and ignore the other car's data. "
+            f"Use the car number to determine which lane the user was in, then use that "
+            f"together with the win indicator described below to set the \"result\" field."
         )
 
     prompt = f"""You are reading a drag racing timeslip. Extract every field you can see.
@@ -814,9 +817,30 @@ Return a JSON object with these keys (use null for anything not visible):
   "humidity_pct": float or null,
   "wind": "speed and direction as printed e.g. 14.25 SE" or null,
   "density_alt_ft": float or null,
+  "result": "Win", "Loss", "Bye", or null,
+  "round_number": "round label as printed e.g. E1, R1, Q2" or null,
   "issues": "any notes or issues printed on the slip" or null
 }}
-Many timeslips print weather conditions (temp, barometric pressure, humidity, wind, corrected/density altitude) — extract those too if present.
+
+HOW TO DETERMINE THE RESULT:
+
+Compulink timing system (most common): The winner's ET on the 1/4-mile line is followed
+immediately by "<<WIN" (left-lane winner) or ">>WIN" (right-lane winner).
+Example: "6.676  <<WIN" means the left-lane car won.
+Example: "8.341  >>WIN" means the right-lane car won.
+If you see "<<WIN" or ">>WIN" anywhere on the slip, use it as the definitive result indicator.
+{f'The user is car number "{car_num}". Identify which lane (Left or Right) that car number appears in, then check which side the WIN marker is on to decide if the result is Win or Loss.' if car_num else 'If only one car is shown, <<WIN means that car won, >>WIN means that car lost.'}
+
+Other timing systems: look for a printed "W" or "L", "WINNER" / "LOSER" text, a checked
+WIN/LOSS box, or a "BYE" label. Map winner → "Win", loser → "Loss", bye run → "Bye".
+If no result indicator is visible at all, use null.
+
+ROUND NUMBER: Look for text like "Rnd # E1 9/10", "Round 1", "R2", "Elim 1", or similar
+near the bottom of the slip. Extract just the round label (e.g. "E1", "R1", "Q2") for
+"round_number", or null if not present.
+
+Many timeslips print weather conditions (temp, barometric pressure, humidity, wind,
+corrected/density altitude) — extract those too if present.
 Return only the JSON object. No markdown, no explanation.{car_hint}"""
 
     response = client.messages.create(
@@ -843,6 +867,20 @@ Return only the JSON object. No markdown, no explanation.{car_hint}"""
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return json.loads(text)
+
+
+def _normalize_slip_result(raw) -> str:
+    """Map any scanner result value to 'Win', 'Loss', 'Bye', or '' (unknown/null)."""
+    if not raw:
+        return ""
+    s = str(raw).strip().upper()
+    if s in ("W", "WIN", "WINNER", "1"):
+        return "Win"
+    if s in ("L", "LOSS", "LOSER", "LOSE", "0"):
+        return "Loss"
+    if s in ("B", "BYE", "BYE RUN"):
+        return "Bye"
+    return ""
 
 
 # ── Geocoding ─────────────────────────────────────────────────────────────────
@@ -1395,13 +1433,17 @@ if _theme_col2.button("☀️ Light" if _dark_mode else "🌑 Dark", key="theme_
     st.rerun()
 
 _cur_page = st.session_state.get("current_page", "dashboard")
-if _cur_page == "dashboard":
+if _cur_page != "dashboard":
+    if st.sidebar.button("📊 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
+        st.session_state["current_page"] = "dashboard"
+        st.rerun()
+if _cur_page != "predictor":
     if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
         st.session_state["current_page"] = "predictor"
         st.rerun()
-else:
-    if st.sidebar.button("📊 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
-        st.session_state["current_page"] = "dashboard"
+if _cur_page != "season":
+    if st.sidebar.button("📅 Season Summary", use_container_width=True, key="nav_to_season"):
+        st.session_state["current_page"] = "season"
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -1845,6 +1887,14 @@ elif _active_csv_name:
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
                             _existing_run["timeslip"] = _scan_result
 
+                            # Auto-populate result from scanned slip (only if not manually set)
+                            _scanned_result = _normalize_slip_result(_scan_result.get("result"))
+                            if _scanned_result:
+                                _rd_auto = _existing_run.get("run_details") or {}
+                                if not _rd_auto.get("result"):
+                                    _rd_auto["result"] = _scanned_result
+                                    _existing_run["run_details"] = _rd_auto
+
                             # 3. Fetch weather
                             _slip_date = _scan_result.get("date")
                             if _slip_date:
@@ -2208,6 +2258,340 @@ if st.session_state.get("current_page") == "predictor":
 
     st.stop()  # Don't render the dashboard when on predictor page
 
+# ── Season Summary page ───────────────────────────────────────────────────────
+if st.session_state.get("current_page") == "season":
+    st.markdown("# 📅 Season Summary")
+    st.markdown(
+        "<p style='color:#888;margin-top:-12px;'>Season stats and records pulled from your saved runs.</p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+
+    # ── Parse year from a timeslip date string in any common format ───────────
+    def _ssm_parse_year(date_str):
+        if not date_str:
+            return None
+        from datetime import datetime
+        s = str(date_str).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s, fmt).year
+            except ValueError:
+                pass
+        try:
+            y = int(s[:4])
+            if 2000 <= y <= 2099:
+                return y
+        except Exception:
+            pass
+        return None
+
+    # ── Build annotated run list from _saved_runs (already loaded above) ──────
+    _ssm_all = []
+    for _sr in _saved_runs:
+        _rec  = _sr.get("record", {})
+        _slip = _rec.get("timeslip") or {}
+        _yr   = _ssm_parse_year(_slip.get("date"))
+        if _yr:
+            _ssm_all.append({"year": _yr, "rec": _rec, "slip": _slip})
+
+    if not _ssm_all:
+        st.info("No runs with dates found yet. Add timeslips to your runs to see season stats here.")
+        st.stop()
+
+    _ssm_years = sorted({r["year"] for r in _ssm_all}, reverse=True)
+    _ssm_sel_year = st.selectbox("Season", _ssm_years, index=0, key="season_year_sel")
+    _ssm_runs = [r for r in _ssm_all if r["year"] == _ssm_sel_year]
+
+    if not _ssm_runs:
+        st.info(f"No runs logged for {_ssm_sel_year}.")
+        st.stop()
+
+    # ── Aggregate stats ───────────────────────────────────────────────────────
+    def _ssm_f(key, cast=float):
+        vals = []
+        for r in _ssm_runs:
+            v = r["slip"].get(key)
+            if v is not None:
+                try:
+                    vals.append(cast(v))
+                except (ValueError, TypeError):
+                    pass
+        return vals
+
+    _ssm_ets  = _ssm_f("ft_1320")   # ET is stored as ft_1320
+    _ssm_mphs = _ssm_f("mph_1320")  # trap MPH is stored as mph_1320
+    _ssm_60s  = _ssm_f("ft_60")
+    _ssm_rts  = _ssm_f("reaction_time")
+
+    _ssm_best_et  = min(_ssm_ets)  if _ssm_ets  else None
+    _ssm_best_mph = max(_ssm_mphs) if _ssm_mphs else None
+    _ssm_best_60  = min(_ssm_60s)  if _ssm_60s  else None
+    _ssm_best_rt  = min(_ssm_rts)  if _ssm_rts  else None
+
+    _ssm_wins   = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Win")
+    _ssm_losses = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Loss")
+    _ssm_byes   = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Bye")
+    _ssm_decided = _ssm_wins + _ssm_losses
+    _ssm_win_pct = (_ssm_wins / _ssm_decided * 100) if _ssm_decided > 0 else None
+
+    _ssm_fmt = lambda v, fmt: fmt.format(v) if v is not None else "—"
+
+    # ── Season Stats card ─────────────────────────────────────────────────────
+    def _ssm_stat_row(label, value, color="#eee", bold=False):
+        fw = "font-weight:700;" if bold else ""
+        return (f'<tr>'
+                f'<td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">{label}</td>'
+                f'<td style="color:{color};{fw}text-align:right;padding:4px 0;">{value}</td>'
+                f'</tr>')
+
+    _ssm_wl_parts = []
+    # Always show W-L-Bye counts; dim to #555 when zero so the non-zero ones pop
+    def _wl_num(n, color, label):
+        c = color if n > 0 else "#444"
+        return f"<span style='color:{c};font-weight:{'700' if n > 0 else '400'};'>{n}&nbsp;{label}</span>"
+    _ssm_wl_html = (
+        _wl_num(_ssm_wins,   "#2ecc71", "W") +
+        " <span style='color:#333;'>&nbsp;·&nbsp;</span> " +
+        _wl_num(_ssm_losses, "#e74c3c", "L") +
+        (" <span style='color:#333;'>&nbsp;·&nbsp;</span> " + _wl_num(_ssm_byes, "#f0a500", "Bye") if _ssm_byes else "")
+    )
+    _ssm_win_pct_str = f"{_ssm_win_pct:.1f}%" if _ssm_win_pct is not None else ("—" if _ssm_decided == 0 else "0.0%")
+
+    _ssm_stat_rows = (
+        _ssm_stat_row("Total Runs",       str(len(_ssm_runs)),                     color="#eee",    bold=True) +
+        _ssm_stat_row("Best ET",          _ssm_fmt(_ssm_best_et,  "{:.3f} s"),     color="#ffcc00", bold=True) +
+        _ssm_stat_row("Best MPH",         _ssm_fmt(_ssm_best_mph, "{:.2f} mph"),   color="#cc1111", bold=True) +
+        (_ssm_stat_row("Best 60ft",       _ssm_fmt(_ssm_best_60,  "{:.3f} s"),     color="#4db8ff") if _ssm_60s  else "") +
+        (_ssm_stat_row("Best Reaction",   _ssm_fmt(_ssm_best_rt,  "{:.3f} s"),     color="#2ecc71") if _ssm_rts  else "") +
+        f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Record</td>'
+        f'<td style="text-align:right;padding:4px 0;">{_ssm_wl_html}</td></tr>' +
+        f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Win %</td>'
+        f'<td style="color:{"#2ecc71" if _ssm_win_pct and _ssm_win_pct >= 50 else "#eee"};'
+        f'font-weight:{"700" if _ssm_decided > 0 else "400"};text-align:right;padding:4px 0;">'
+        f'{_ssm_win_pct_str}</td></tr>'
+    )
+
+    st.markdown(f"""
+<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
+  background:#0a0a0a;font-family:monospace;max-width:480px;">
+  <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
+    border-bottom:1px solid #2a0000;padding-bottom:6px;">
+    🏆 {_ssm_sel_year} Season Stats
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">
+    {_ssm_stat_rows}
+  </table>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Chronological Run Log ─────────────────────────────────────────────────
+    # Sort runs by date+time ascending so multiple same-day runs are ordered correctly
+    def _ssm_sort_key(r):
+        from datetime import datetime
+        date_s = str(r["slip"].get("date", "") or "").strip()
+        time_s = str(r["slip"].get("time", "") or "").strip()
+        dt = datetime.min
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(date_s, fmt)
+                break
+            except ValueError:
+                pass
+        if time_s:
+            for tfmt in ("%H:%M", "%I:%M %p", "%I:%M%p"):
+                try:
+                    t = datetime.strptime(time_s, tfmt)
+                    dt = dt.replace(hour=t.hour, minute=t.minute)
+                    break
+                except ValueError:
+                    pass
+        return dt
+
+    _ssm_sorted = sorted(_ssm_runs, key=_ssm_sort_key)
+
+    # Find best ET / reaction / 60ft indices for per-cell highlights
+    def _ssm_best_low_idx(key):
+        """Return the row index of the lowest non-null value for a slip field, or -1."""
+        vals = []
+        for _ri, _rr in enumerate(_ssm_sorted):
+            try:
+                vals.append((_ri, float(_rr["slip"].get(key))))
+            except (TypeError, ValueError):
+                pass
+        return min(vals, key=lambda x: x[1])[0] if vals else -1
+
+    _ssm_best_et_idx  = _ssm_best_low_idx("ft_1320")
+    _ssm_best_rt_idx  = _ssm_best_low_idx("reaction_time")
+    _ssm_best_60_idx  = _ssm_best_low_idx("ft_60")
+
+    def _ssm_cell(val, fmt=None, zero_blank=False):
+        """Format a cell value or return an em-dash."""
+        if val is None or val == "":
+            return "—"
+        if zero_blank:
+            try:
+                if float(val) == 0:
+                    return "—"
+            except (ValueError, TypeError):
+                pass
+        if fmt:
+            try:
+                return fmt.format(float(val))
+            except (ValueError, TypeError):
+                pass
+        return str(val)
+
+    _ssm_log_rows_html = ""
+    for _ri, _rr in enumerate(_ssm_sorted):
+        _sl  = _rr["slip"]
+        _rd2 = _rr["rec"].get("run_details") or {}
+        _wx2 = _rr["rec"].get("weather") or {}
+        _is_best_et = (_ri == _ssm_best_et_idx)
+        _is_best_rt = (_ri == _ssm_best_rt_idx)
+        _is_best_60 = (_ri == _ssm_best_60_idx)
+
+        _row_bg  = "background:#1a0505;" if _is_best_et else ""
+        _et_color = "#ffcc00" if _is_best_et else "#e08030"
+        _et_bold  = "font-weight:700;" if _is_best_et else ""
+        _rt_color = "#2ecc71" if _is_best_rt else "#aaa"
+        _rt_bold  = "font-weight:700;" if _is_best_rt else ""
+        _60_color = "#4db8ff" if _is_best_60 else "#aaa"
+        _60_bold  = "font-weight:700;" if _is_best_60 else ""
+
+        _res_val   = _rd2.get("result", "")
+        _res_color = {"Win": "#2ecc71", "Loss": "#e74c3c", "Bye": "#f0a500"}.get(_res_val, "#666")
+        _res_icon  = {"Win": "🏆", "Loss": "❌", "Bye": "🚗"}.get(_res_val, "")
+        _res_disp  = f"{_res_icon} {_res_val}" if _res_val else "—"
+
+        # DA: prefer stored, fall back to recalc
+        _da2 = _wx2.get("density_alt_ft")
+        if _da2 is None:
+            _da2 = calc_density_altitude(
+                _wx2.get("temperature_f"), _wx2.get("humidity_pct"), _wx2.get("pressure_hpa")
+            )
+        _da_disp = f"{int(round(_da2)):,}" if _da2 is not None else "—"
+
+        # Date + time combined for display (e.g. "2026-06-13 10:34 AM")
+        _date_str = _sl.get("date") or ""
+        _time_str = _sl.get("time") or ""
+        if _time_str:
+            # Convert 24h "HH:MM" → 12h "H:MM AM/PM"
+            try:
+                from datetime import datetime as _dt
+                _t = _dt.strptime(_time_str.strip(), "%H:%M")
+                _time_disp = _t.strftime("%-I:%M %p")
+            except Exception:
+                _time_disp = _time_str
+            _date_disp = f"{_date_str} {_time_disp}" if _date_str else _time_disp
+        else:
+            _date_disp = _date_str if _date_str else "—"
+
+        # 660ft MPH column
+        _mph_660 = _ssm_cell(_sl.get("mph_660"), fmt="{:.2f}")
+
+        _ssm_log_rows_html += (
+            f'<tr>'
+            f'<td style="padding:4px 6px;text-align:left;border-bottom:1px solid #111;{_row_bg}color:#aaa;white-space:nowrap;">'
+            f'{_date_disp}</td>'
+            f'<td style="padding:4px 6px;text-align:left;border-bottom:1px solid #111;{_row_bg}color:#ddd;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;">'
+            f'{_ssm_cell(_sl.get("track_name") or _sl.get("track_location"))}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_rt_color};{_rt_bold}">{_ssm_cell(_sl.get("reaction_time"), "{:.3f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_60_color};{_60_bold}">{_ssm_cell(_sl.get("ft_60"),  "{:.3f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#aaa;">{_ssm_cell(_sl.get("ft_330"), "{:.3f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#aaa;">{_mph_660}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#aaa;">{_ssm_cell(_sl.get("ft_1000"), "{:.3f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_et_color};{_et_bold}">{_ssm_cell(_sl.get("ft_1320"), "{:.3f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#eee;">{_ssm_cell(_sl.get("mph_1320"), "{:.2f}")}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#888;">{_da_disp}</td>'
+            f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_res_color};">{_res_disp}</td>'
+            f'</tr>'
+        )
+
+    _col_hdr = 'style="color:#666;font-weight:500;padding:4px 6px 8px;text-align:right;border-bottom:1px solid #2a0000;white-space:nowrap;"'
+    _col_hdrl = 'style="color:#666;font-weight:500;padding:4px 6px 8px;text-align:left;border-bottom:1px solid #2a0000;white-space:nowrap;"'
+
+    st.markdown(f"""
+<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
+  background:#0a0a0a;font-family:monospace;overflow-x:auto;">
+  <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
+    border-bottom:1px solid #2a0000;padding-bottom:6px;">
+    📋 Run Log
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.82rem;min-width:720px;">
+    <thead><tr>
+      <th {_col_hdrl}>Date</th>
+      <th {_col_hdrl}>Track</th>
+      <th {_col_hdr}>Reaction</th>
+      <th {_col_hdr}>60ft</th>
+      <th {_col_hdr}>330ft</th>
+      <th {_col_hdr}>660ft&nbsp;MPH</th>
+      <th {_col_hdr}>1000ft</th>
+      <th {_col_hdr}>ET</th>
+      <th {_col_hdr}>MPH</th>
+      <th {_col_hdr}>DA&nbsp;ft</th>
+      <th {_col_hdr}>Result</th>
+    </tr></thead>
+    <tbody>{_ssm_log_rows_html}</tbody>
+  </table>
+</div>
+<p style="color:#555;font-size:0.75rem;margin-top:8px;margin-left:2px;font-family:monospace;line-height:1.8;">
+  <span style="display:inline-block;width:9px;height:9px;background:#ffcc00;border-radius:2px;vertical-align:middle;margin-right:4px;"></span><span style="color:#888;">Best ET</span>
+  &nbsp;&nbsp;&nbsp;
+  <span style="display:inline-block;width:9px;height:9px;background:#2ecc71;border-radius:2px;vertical-align:middle;margin-right:4px;"></span><span style="color:#888;">Best Reaction</span>
+  &nbsp;&nbsp;&nbsp;
+  <span style="display:inline-block;width:9px;height:9px;background:#4db8ff;border-radius:2px;vertical-align:middle;margin-right:4px;"></span><span style="color:#888;">Best 60ft</span>
+</p>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Runs by Track ─────────────────────────────────────────────────────────
+    _ssm_track_map: dict = {}
+    for r in _ssm_runs:
+        _tk = (r["slip"].get("track_name") or r["slip"].get("track_location") or "Unknown").strip() or "Unknown"
+        if _tk not in _ssm_track_map:
+            _ssm_track_map[_tk] = {"runs": 0, "ets": []}
+        _ssm_track_map[_tk]["runs"] += 1
+        _et_v = r["slip"].get("ft_1320")   # ET stored as ft_1320
+        if _et_v is not None:
+            try:
+                _ssm_track_map[_tk]["ets"].append(float(_et_v))
+            except (ValueError, TypeError):
+                pass
+
+    _ssm_track_rows_html = ""
+    for _tk, _td in sorted(_ssm_track_map.items(), key=lambda x: -x[1]["runs"]):
+        _best = f"{min(_td['ets']):.3f}s" if _td["ets"] else "—"
+        _ssm_track_rows_html += (
+            f'<tr>'
+            f'<td style="color:#eee;padding:5px 12px 5px 0;">{_tk}</td>'
+            f'<td style="color:#aaa;text-align:center;padding:5px 12px;">{_td["runs"]}</td>'
+            f'<td style="color:#ffcc00;font-weight:700;text-align:right;padding:5px 0;">{_best}</td>'
+            f'</tr>'
+        )
+
+    st.markdown(f"""
+<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
+  background:#0a0a0a;font-family:monospace;">
+  <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
+    border-bottom:1px solid #2a0000;padding-bottom:6px;">
+    🏟️ Runs by Track
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">
+    <thead>
+      <tr>
+        <th style="color:#666;text-align:left;padding:4px 12px 8px 0;font-weight:500;">Track</th>
+        <th style="color:#666;text-align:center;padding:4px 12px 8px;font-weight:500;">Runs</th>
+        <th style="color:#666;text-align:right;padding:4px 0 8px;font-weight:500;">Best ET</th>
+      </tr>
+    </thead>
+    <tbody>{_ssm_track_rows_html}</tbody>
+  </table>
+</div>""", unsafe_allow_html=True)
+
+    st.stop()  # Don't render the dashboard on the season page
+
 # ── Main area ─────────────────────────────────────────────────────────────────
 print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
 if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
@@ -2302,6 +2686,14 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
                         try:
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
                             _new_run_rec["timeslip"] = _scan_result
+
+                            # Auto-populate result from scanned slip (only if not manually set)
+                            _scanned_result = _normalize_slip_result(_scan_result.get("result"))
+                            if _scanned_result:
+                                _rd_auto = _new_run_rec.get("run_details") or {}
+                                if not _rd_auto.get("result"):
+                                    _rd_auto["result"] = _scanned_result
+                                    _new_run_rec["run_details"] = _rd_auto
 
                             # ── Fetch weather ─────────────────────────────────
                             _slip_date = _scan_result.get("date")
@@ -2470,6 +2862,13 @@ if _slip_bytes is not None and "timeslip" not in run:
             try:
                 slip_data = scan_timeslip(_slip_bytes, _slip_media, api_key, car_number_input)
                 run["timeslip"] = slip_data
+                # Auto-populate result from scanned slip (only if not manually set)
+                _scanned_result = _normalize_slip_result(slip_data.get("result"))
+                if _scanned_result:
+                    _rd_auto = run.get("run_details") or {}
+                    if not _rd_auto.get("result"):
+                        _rd_auto["result"] = _scanned_result
+                        run["run_details"] = _rd_auto
                 run["csv_name"] = csv_name
                 save_run(csv_name, run)
                 _scan_status.update(label="✅ Timeslip scanned!", state="complete", expanded=False)
@@ -2834,6 +3233,13 @@ with _main_left:
                             placeholder="e.g. First pass of day, track freshly prepped...", height=70,
                             key=f"rd_notes_{_rk}")
 
+            _rd_result_opts = ["", "Win", "Loss", "Bye"]
+            _rd_result_val  = _rd.get("result", "")
+            _rd_result_idx  = _rd_result_opts.index(_rd_result_val) if _rd_result_val in _rd_result_opts else 0
+            _rd_result = st.selectbox("Result", options=_rd_result_opts, index=_rd_result_idx,
+                            key=f"rd_result_{_rk}",
+                            help="Did this run end in a win, loss, or bye run?")
+
             _rd_payload = {
                 "tire_pressure_fl": _rd_tire_fl,  "tire_pressure_fr": _rd_tire_fr,
                 "tire_pressure_rl": _rd_tire_rl,  "tire_pressure_rr": _rd_tire_rr,
@@ -2846,6 +3252,7 @@ with _main_left:
                 "wheelie_bar_d":    _rd_wb_d,        "wheelie_bar_p": _rd_wb_p,
                 "spark_plug":       _rd_spark_plug,  "plug_gap":      _rd_plug_gap,
                 "valve_lash":       _rd_valve_lash,  "notes":         _rd_notes,
+                "result":           _rd_result,
             }
             _btn_col1, _btn_col2 = st.columns(2)
             _rd_save        = _btn_col1.form_submit_button("💾 Save Run Details",    use_container_width=True, type="secondary")
@@ -3356,7 +3763,7 @@ _has_car_profile = any(cfg.get(k) for k in (
 ))
 _rd_saved = run.get("run_details", {})
 _has_run_details = any(_rd_saved.get(k) for k in ("tire_pressure_fl","track_temp_f",
-                                                    "launch_rpm","notes"))
+                                                    "launch_rpm","notes","result"))
 
 _pc1, _pc2 = st.columns(2)
 
@@ -3426,6 +3833,16 @@ with _pc2:
 
     _r = _rd_saved  # shorthand
 
+    # ── Result (Win / Loss / Bye) ──
+    _result_val = _r.get("result", "")
+    _result_rows = ""
+    if _result_val:
+        _result_icon  = {"Win": "🏆", "Loss": "❌", "Bye": "🚗"}.get(_result_val, "")
+        _result_color = {"Win": "#2ecc71", "Loss": "#e74c3c", "Bye": "#f0a500"}.get(_result_val, "#eee")
+        _result_rows  = (f'<tr><td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Result</td>'
+                         f'<td style="color:{_result_color};font-weight:700;text-align:right;">'
+                         f'{_result_icon} {_result_val}</td></tr>')
+
     # ── Tires ──
     _tfl = _r.get("tire_pressure_fl", 0) or 0
     _tfr = _r.get("tire_pressure_fr", 0) or 0
@@ -3478,6 +3895,7 @@ with _pc2:
 
     # ── Assemble all sections ──
     _rd_rows = (
+        _result_rows +
         _rd_section("Tires",                  _tire_rows) +
         _rd_section("Track / Tire Conditions", _cond_rows) +
         _rd_section("RPM",                    _rpm_rows)  +
