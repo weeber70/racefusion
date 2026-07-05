@@ -1033,44 +1033,22 @@ _inject_theme(_dark_mode)
 
 # ── Feedback button — fixed top-right, always visible ────────────────────────
 import urllib.parse as _urlparse
-_fb_subject = _urlparse.quote(f"RaceFusion Feedback – {_current_user}")
+_fb_user    = st.session_state.get("rf_user", "unknown")
+_fb_subject = _urlparse.quote(f"RaceFusion Feedback – {_fb_user}")
 _fb_body    = _urlparse.quote(
-    f"Username: {_current_user}\n\n"
+    f"Username: {_fb_user}\n\n"
     f"What were you doing when the issue occurred?\n\n\n"
     f"What happened?\n\n\n"
     f"What did you expect to happen?\n"
 )
 _fb_href = f"mailto:chris@weebenterprises.com?subject={_fb_subject}&body={_fb_body}"
-_fb_bg    = "#1a1a24" if _dark_mode else "#f0f0f5"
-_fb_color = "#888"    if _dark_mode else "#666"
-_fb_border= "#2a2a3a" if _dark_mode else "#d0d0d8"
 st.markdown(f"""
-<style>
-#rf-feedback-btn {{
-    position: fixed;
-    top: 14px;
-    right: 18px;
-    z-index: 99999;
-}}
-#rf-feedback-btn a {{
-    display: inline-block;
-    padding: 5px 12px;
-    font-size: 0.78rem;
-    background: {_fb_bg};
-    color: {_fb_color};
-    border: 1px solid {_fb_border};
-    border-radius: 6px;
-    text-decoration: none;
-    font-family: sans-serif;
-    transition: border-color 0.15s, color 0.15s;
-}}
-#rf-feedback-btn a:hover {{
-    border-color: #cc1111;
-    color: #ffffff;
-}}
-</style>
-<div id="rf-feedback-btn">
-  <a href="{_fb_href}">📧 Send Feedback</a>
+<div style="position: fixed; top: 60px; right: 20px; z-index: 9999;">
+  <a href="{_fb_href}"
+     style="background:#333; color:#fff; padding:8px 14px; border-radius:6px;
+            text-decoration:none; font-size:13px; font-family:sans-serif;">
+    📧 Send Feedback
+  </a>
 </div>
 """, unsafe_allow_html=True)
 
