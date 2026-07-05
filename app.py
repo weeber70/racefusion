@@ -889,33 +889,14 @@ def geocode(location: str) -> tuple[float | None, float | None, str]:
 # ── Historical weather ────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Fetching weather…")
 def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict:
-    """Fetch hourly weather from Open-Meteo archive for a given date and hour.
-
-    Station pressure is computed by converting pressure_msl to the actual
-    track elevation via the hypsometric formula.  This is more accurate than
-    using ERA5's surface_pressure, which reflects the model's terrain
-    elevation (coarse grid) rather than the true track elevation.
-    """
-    # ── Step 1: actual terrain elevation ────────────────────────────────────
-    elevation_m: float | None = None
-    try:
-        _elev_r = requests.get(
-            "https://api.open-meteo.com/v1/elevation",
-            params={"latitude": lat, "longitude": lon},
-            timeout=10,
-        )
-        elevation_m = (_elev_r.json().get("elevation") or [None])[0]
-    except Exception:
-        pass
-
-    # ── Step 2: archive weather ──────────────────────────────────────────────
+    """Fetch hourly weather from Open-Meteo archive for a given date and hour."""
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": lat,
         "longitude": lon,
         "start_date": date_str,
         "end_date": date_str,
-        "hourly": "temperature_2m,relativehumidity_2m,pressure_msl,surface_pressure,windspeed_10m,winddirection_10m",
+        "hourly": "temperature_2m,relativehumidity_2m,surface_pressure,windspeed_10m,winddirection_10m",
         "temperature_unit": "fahrenheit",
         "windspeed_unit": "mph",
         "timezone": "auto",
@@ -931,25 +912,12 @@ def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict
         arr = hourly.get(key, [])
         return arr[idx] if idx < len(arr) else None
 
-    temp_f = val("temperature_2m")
-    p_msl  = val("pressure_msl")
-    p_surf = val("surface_pressure")
-
-    # ── Step 3: MSL → station pressure at actual elevation ──────────────────
-    # P_station = P_msl × ((T_k − 0.0065·z) / T_k)^5.2556
-    if p_msl is not None and elevation_m is not None and temp_f is not None:
-        T_k = (temp_f - 32) * 5 / 9 + 273.15
-        pressure_hpa = p_msl * ((T_k - 0.0065 * elevation_m) / T_k) ** 5.2556
-    else:
-        pressure_hpa = p_surf  # fallback: ERA5 surface pressure
-
     return {
-        "temperature_f": temp_f,
+        "temperature_f": val("temperature_2m"),
         "humidity_pct":  val("relativehumidity_2m"),
-        "pressure_hpa":  pressure_hpa,
+        "pressure_hpa":  val("surface_pressure"),
         "windspeed_mph": val("windspeed_10m"),
         "wind_dir_deg":  val("winddirection_10m"),
-        "elevation_m":   elevation_m,
     }
 
 def wind_dir_label(deg: float | None) -> str:
@@ -960,25 +928,34 @@ def wind_dir_label(deg: float | None) -> str:
 
 def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pressure_hpa: float | None) -> float | None:
     """
-    Density Altitude in feet — the standard drag racing atmospheric correction.
-    Uses actual air density vs. ISA sea-level density (1.225 kg/m³).
-    DA = 145442.16 × (1 - (ρ/ρ₀)^0.234969)
+    Density Altitude in feet — motorsports standard (airdensityonline.com / NHRA).
+
+    Reference conditions: 29.92 inHg, dry air, sea level.
+    Uses DRY AIR density only: rho = P_dry / (R_d × T_k)
+    where P_dry = station_pressure − vapor_pressure.
+
+    Water vapor displaces oxygen-bearing dry air; excluding the vapor density
+    term captures this effect and matches the drag racing industry standard.
+    The full-moist-air formula (adding vapor density) overstates air density
+    and produces DA readings ~500 ft too low.
+
+    DA = 145442.16 × (1 − (ρ_dry / 1.225)^0.234969)
     """
     if any(v is None for v in [temp_f, humidity_pct, pressure_hpa]):
         return None
     import math
-    T_c = (temp_f - 32) * 5 / 9
-    T_k = T_c + 273.15
-    P_pa = pressure_hpa * 100.0
-    RH = humidity_pct / 100.0
+    T_c   = (temp_f - 32) * 5 / 9
+    T_k   = T_c + 273.15
+    P_pa  = pressure_hpa * 100.0              # hPa → Pa
+    RH    = humidity_pct / 100.0
     # Saturation vapor pressure (Magnus formula)
-    e_s_pa = 610.78 * math.exp(17.27 * T_c / (T_c + 237.3))
-    e_pa = RH * e_s_pa                          # actual vapor pressure
-    P_d = P_pa - e_pa                           # partial pressure dry air
-    rho = (P_d / (287.058 * T_k)) + (e_pa / (461.495 * T_k))  # kg/m³
-    rho_sl = 1.225                              # ISA sea-level density kg/m³
-    DA = 145442.16 * (1 - (rho / rho_sl) ** 0.234969)
-    return DA  # feet
+    e_s   = 610.78 * math.exp(17.27 * T_c / (T_c + 237.3))
+    e_pa  = RH * e_s                          # actual vapor pressure (Pa)
+    P_dry = P_pa - e_pa                       # dry-air partial pressure (Pa)
+    # Dry-air density only — motorsports standard, matches airdensityonline.com
+    rho   = P_dry / (287.058 * T_k)          # kg/m³
+    rho_sl = 1.225                            # ISA sea-level density (kg/m³)
+    return 145442.16 * (1 - (rho / rho_sl) ** 0.234969)  # feet
 
 
 # ── Race Day Predictor helpers ────────────────────────────────────────────────
@@ -986,59 +963,28 @@ def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pres
 def fetch_current_weather(lat: float, lon: float) -> dict:
     """Fetch live conditions from Open-Meteo forecast API (not archive).
 
-    Uses pressure_msl + actual elevation for station pressure — same approach
-    as fetch_weather — because the forecast API's surface_pressure also
-    reflects model terrain, not the true track elevation.
-
-    Variable names use the current Open-Meteo API convention
-    (relative_humidity_2m / wind_speed_10m) with fallbacks for older names.
+    Uses forecast API with real-time data assimilation (forecast_days=1)
+    for better accuracy than ERA5 reanalysis on current conditions.
+    Variable names match current Open-Meteo API convention with legacy fallbacks.
     """
-    # ── Step 1: actual terrain elevation ────────────────────────────────────
-    elevation_m: float | None = None
-    try:
-        _elev_r = requests.get(
-            "https://api.open-meteo.com/v1/elevation",
-            params={"latitude": lat, "longitude": lon},
-            timeout=10,
-        )
-        elevation_m = (_elev_r.json().get("elevation") or [None])[0]
-    except Exception:
-        pass
-
-    # ── Step 2: current forecast weather ────────────────────────────────────
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude":         lat,
         "longitude":        lon,
-        # Use current Open-Meteo variable names (relative_humidity_2m / wind_speed_10m)
-        "current":          "temperature_2m,relative_humidity_2m,pressure_msl,surface_pressure,wind_speed_10m",
+        "current":          "temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m",
+        "forecast_days":    1,
         "temperature_unit": "fahrenheit",
         "windspeed_unit":   "mph",
         "timezone":         "auto",
     }
     r   = requests.get(url, params=params, timeout=15)
     cur = r.json().get("current", {})
-
-    temp_f   = cur.get("temperature_2m")
-    # Accept both current and legacy humidity key names
-    humidity = cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m")
-    p_msl    = cur.get("pressure_msl")
-    p_surf   = cur.get("surface_pressure")
-    windspd  = cur.get("wind_speed_10m") or cur.get("windspeed_10m")
-
-    # ── Step 3: MSL → station pressure at actual elevation ──────────────────
-    if p_msl is not None and elevation_m is not None and temp_f is not None:
-        T_k = (temp_f - 32) * 5 / 9 + 273.15
-        pressure_hpa = p_msl * ((T_k - 0.0065 * elevation_m) / T_k) ** 5.2556
-    else:
-        pressure_hpa = p_surf  # fallback: surface pressure
-
     return {
-        "temperature_f": temp_f,
-        "humidity_pct":  humidity,
-        "pressure_hpa":  pressure_hpa,
-        "windspeed_mph": windspd,
-        "elevation_m":   elevation_m,
+        "temperature_f": cur.get("temperature_2m"),
+        # Accept both current (relative_humidity_2m) and legacy (relativehumidity_2m) key names
+        "humidity_pct":  cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m"),
+        "pressure_hpa":  cur.get("surface_pressure"),
+        "windspeed_mph": cur.get("wind_speed_10m") or cur.get("windspeed_10m"),
     }
 
 
