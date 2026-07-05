@@ -23,43 +23,87 @@ _sb = (
     else None
 )
 
-# ── Auth gate ─────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Race Day Predictor · RaceFusion", page_icon="🏁", layout="wide")
+# ── Page config — must be first Streamlit call ────────────────────────────────
+st.set_page_config(
+    page_title="Race Day Predictor · RaceFusion",
+    page_icon="🏁",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-if not st.session_state.get("rf_user"):
-    st.warning("🔒 Please log in from the main RaceFusion page first.")
-    st.stop()
-
-_user = st.session_state["rf_user"]
-
-# ── Dark theme CSS ────────────────────────────────────────────────────────────
+# ── Dark theme CSS + hide built-in nav ────────────────────────────────────────
 st.markdown("""
 <style>
+[data-testid="stSidebarNav"] { display: none !important; }
 .stApp, [data-testid="stAppViewContainer"] {
-    background-color: #0b0b12 !important;
+    background-color: #08080d !important;
 }
 [data-testid="stSidebar"], [data-testid="stSidebarContent"] {
-    background-color: #0f0f18 !important;
-    border-right: 1px solid #1e1e2a !important;
+    background-color: #0d0d14 !important;
+    border-right: 1px solid #2a1a1a !important;
 }
-h1, h2, h3 { color: #cc1111 !important; }
+[data-testid="stHeader"] {
+    background-color: #08080d !important;
+    border-bottom: 1px solid #1a0a0a !important;
+}
+.main .block-container { background-color: #08080d !important; }
+.stApp, .stMarkdown, p, span, label, div { color: #e8e8e8 !important; }
+h1, h2, h3, h4, h5, h6 { color: #cc1111 !important; }
+.stCaption, [data-testid="stCaptionContainer"] { color: #999 !important; }
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] div,
+[data-testid="stSidebar"] .stMarkdown { color: #e0e0e0 !important; }
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: #cc1111 !important; }
+input, textarea, [data-testid="stTextInput"] input {
+    background-color: #141420 !important;
+    color: #e8e8e8 !important;
+    border: 1px solid #2a2a3a !important;
+}
+button[kind="primary"], [data-testid="baseButton-primary"] {
+    background-color: #cc1111 !important;
+    color: #ffffff !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+button[kind="secondary"], [data-testid="baseButton-secondary"] {
+    background-color: #1a1a24 !important;
+    color: #e8e8e8 !important;
+    border: 1px solid #3a2a2a !important;
+}
+button[kind="secondary"]:hover { background-color: #2a1a1a !important; border-color: #cc1111 !important; }
+[data-testid="metric-container"] {
+    background-color: #0f0f18 !important;
+    border: 1px solid #2a1a1a !important;
+    border-radius: 8px !important;
+    padding: 12px !important;
+}
 [data-testid="stMetricLabel"] { color: #999 !important; text-align: center !important; }
 [data-testid="stMetricValue"] { color: #e8e8e8 !important; text-align: center !important; }
 [data-testid="stMetricValue"] > div {
     white-space: normal !important; overflow: visible !important;
     text-overflow: unset !important; font-size: clamp(1rem, 1.8vw, 2rem) !important;
+    line-height: 1.2 !important;
 }
-button[kind="primary"], [data-testid="baseButton-primary"] {
-    background-color: #cc1111 !important; color: #ffffff !important;
-    border: none !important; font-weight: 700 !important;
-}
-button[kind="secondary"], [data-testid="baseButton-secondary"] {
-    background-color: #1a1a24 !important; color: #e8e8e8 !important;
-    border: 1px solid #3a2a2a !important;
-}
-div[data-testid="stDataFrame"] { background: #0f0f18; }
+[data-testid="stAlert"] { background-color: #2a0000 !important; border-left: 4px solid #ff2222 !important; }
+hr { border-color: #2a1a1a !important; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0d0d14; }
+::-webkit-scrollbar-thumb { background: #3a1a1a; border-radius: 3px; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Auth gate ─────────────────────────────────────────────────────────────────
+if not st.session_state.get("rf_user"):
+    st.warning("🔒 Please log in from the main RaceFusion page first.")
+    if st.button("← Go to Login"):
+        st.switch_page("app.py")
+    st.stop()
+
+_user = st.session_state["rf_user"]
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
@@ -217,11 +261,14 @@ _cfg_lat       = cfg.get("lat")
 _cfg_lon       = cfg.get("lon")
 
 # ── Page header ───────────────────────────────────────────────────────────────
-st.markdown("# 🏁 Race Day Predictor")
-st.markdown(
+_hdr_left, _hdr_right = st.columns([6, 1])
+_hdr_left.markdown("# 🏁 Race Day Predictor")
+_hdr_left.markdown(
     "<p style='color:#888;margin-top:-12px;'>Predicted ET and suggested dial based on your car's history + today's air.</p>",
     unsafe_allow_html=True,
 )
+if _hdr_right.button("📊 Run Analysis", use_container_width=True, key="nav_back"):
+    st.switch_page("app.py")
 st.markdown("---")
 
 # ── SECTION 1: Current Conditions ─────────────────────────────────────────────

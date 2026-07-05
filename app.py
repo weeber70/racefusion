@@ -264,6 +264,8 @@ hr { border-color: #2a1a1a !important; }
 ::-webkit-scrollbar-track { background: #0d0d14; }
 ::-webkit-scrollbar-thumb { background: #3a1a1a; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #cc1111; }
+/* ── Hide built-in Streamlit page nav ── */
+[data-testid="stSidebarNav"] { display: none !important; }
 /* ── Multiselect tags ── */
 [data-baseweb="tag"] {
     background-color: #2a0a0a !important;
@@ -339,6 +341,8 @@ li[role="option"] * { color: inherit !important; }
     else:
         css = """
 <style>
+/* ── Hide built-in Streamlit page nav ── */
+[data-testid="stSidebarNav"] { display: none !important; }
 .stApp, [data-testid="stAppViewContainer"] {
     background-color: #f5f5f7 !important;
 }
@@ -1159,6 +1163,9 @@ _theme_col1.caption("Theme")
 if _theme_col2.button("☀️ Light" if _dark_mode else "🌑 Dark", key="theme_toggle"):
     st.session_state["dark_mode"] = not _dark_mode
     st.rerun()
+
+if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
+    st.switch_page("pages/2_Race_Day_Predictor.py")
 
 st.sidebar.markdown("---")
 
