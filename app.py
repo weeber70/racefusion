@@ -26,8 +26,23 @@ st.set_page_config(
     page_title="RaceFusion",
     page_icon="🏁",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
+
+# ── Hide Streamlit built-in page navigation — must run before any other render ──
+st.markdown("""
+<style>
+[data-testid="stSidebarNav"],
+[data-testid="stSidebarNavItems"],
+[data-testid="stSidebarNavLink"],
+section[data-testid="stSidebar"] > div:first-child > div:first-child,
+.st-emotion-cache-1oe5cao,
+nav[data-testid="stSidebarNav"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ── Logo loader ───────────────────────────────────────────────────────────────
 def _load_logo_b64(filename: str = "racefusion_logo.png") -> str | None:

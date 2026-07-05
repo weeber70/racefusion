@@ -31,7 +31,22 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Dark theme CSS + hide built-in nav ────────────────────────────────────────
+# ── Hide Streamlit built-in page navigation — must run before any other render ──
+st.markdown("""
+<style>
+[data-testid="stSidebarNav"],
+[data-testid="stSidebarNavItems"],
+[data-testid="stSidebarNavLink"],
+section[data-testid="stSidebar"] > div:first-child > div:first-child,
+.st-emotion-cache-1oe5cao,
+nav[data-testid="stSidebarNav"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ── Dark theme CSS ────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"] { display: none !important; }
