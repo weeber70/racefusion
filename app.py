@@ -1006,15 +1006,33 @@ def fetch_metar(lat: float, lon: float) -> dict:
     Searches all stations within a ~150 nm bounding box, picks the nearest
     one that has a complete report (temp + altimeter), and converts:
       • temp/dewpoint → temperature_f and humidity_pct
-      • altimeter (QNH, inHg) → station pressure (hPa) via the standard
-        aviation barometric formula: P_stn = P_altim × (1−6.8753e-6·Z_ft)^5.2559
+      • altim (hPa, sea-level QNH) → station pressure (hPa):
+            1. hPa → inHg:  P_inHg = altim × 0.02953
+            2. Altimeter → station:  P_stn_inHg = P_inHg × (1 − 6.8756×10⁻⁶ × Z_ft)^5.2561
+            3. inHg → hPa:  P_stn_hPa = P_stn_inHg / 0.02953
+        Track elevation (from Open-Meteo elevation API) is used for Z_ft;
+        falls back to the METAR station's own elevation if unavailable.
 
-    Falls back to Open-Meteo forecast API if no METAR is found.
+    Falls back to Open-Meteo forecast API if no METAR is found within 150 nm.
     """
     import math
     from datetime import datetime, timezone as _tz
 
-    # ── Search within ~150 nm bounding box ───────────────────────────────────
+    # ── Step 1: fetch track elevation (for accurate station pressure) ─────────
+    track_elev_ft: float | None = None
+    try:
+        _er = requests.get(
+            "https://api.open-meteo.com/v1/elevation",
+            params={"latitude": lat, "longitude": lon},
+            timeout=10,
+        )
+        _em = (_er.json().get("elevation") or [None])[0]
+        if _em is not None:
+            track_elev_ft = float(_em) / 0.3048  # metres → feet
+    except Exception:
+        pass
+
+    # ── Step 2: search within ~150 nm bounding box ───────────────────────────
     pad  = 2.5   # degrees ≈ 150 nm
     bbox = f"{lat-pad:.2f},{lon-pad:.2f},{lat+pad:.2f},{lon+pad:.2f}"
     stations: list = []
@@ -1029,7 +1047,7 @@ def fetch_metar(lat: float, lon: float) -> dict:
     except Exception:
         pass
 
-    # ── Pick nearest station with temp + altimeter ───────────────────────────
+    # ── Step 3: pick nearest station with temp + altimeter ───────────────────
     best: dict | None = None
     best_dist: float  = float("inf")
     for s in stations:
@@ -1045,11 +1063,11 @@ def fetch_metar(lat: float, lon: float) -> dict:
     if best is None:
         return _fetch_omw_current(lat, lon)
 
-    # ── Parse fields ─────────────────────────────────────────────────────────
+    # ── Step 4: parse fields ──────────────────────────────────────────────────
     temp_c  = float(best["temp"])
     dewp_c  = best.get("dewp")
-    altim   = float(best["altim"])          # inHg (QNH / altimeter setting)
-    elev_ft = float(best.get("elev") or 0) # station elevation, feet
+    altim   = float(best["altim"])          # hPa (altimeter setting / QNH, sea-level corrected)
+    elev_ft = float(best.get("elev") or 0) # METAR station elevation, feet (fallback)
     icao    = best.get("icaoId") or best.get("id") or "???"
     name    = (best.get("name") or icao).strip()
     obs_ts  = best.get("obsTime")           # Unix timestamp
@@ -1064,9 +1082,17 @@ def fetch_metar(lat: float, lon: float) -> dict:
     else:
         humidity_pct = None
 
-    # Altimeter setting → station pressure (standard aviation barometric formula)
-    # P_stn (hPa) = P_altim_inHg × 33.8639 × (1 − 6.8753×10⁻⁶ × elev_ft)^5.2559
-    pressure_hpa = altim * 33.8639 * (1 - 6.8753e-6 * elev_ft) ** 5.2559
+    # ── Step 5: altimeter (hPa, sea-level) → station pressure (hPa) ──────────
+    # NOAA METAR `altim` is in hPa — NOT inHg.  Using it directly as inHg
+    # would produce a pressure of ~34,000 hPa and a DA of −184,979 ft.
+    # Use track elevation from Open-Meteo; fall back to airport elevation.
+    calc_elev_ft = track_elev_ft if track_elev_ft is not None else elev_ft
+    # 1. hPa → inHg
+    pressure_inhg = altim * 0.02953
+    # 2. Altimeter setting → station pressure at track elevation
+    pressure_station_inhg = pressure_inhg * ((1 - (0.0000068756 * calc_elev_ft)) ** 5.2561)
+    # 3. inHg → hPa (DA formula expects hPa)
+    pressure_hpa = pressure_station_inhg / 0.02953
 
     windspeed_mph = float(wspd_kt) * 1.15078 if wspd_kt is not None else None
 
