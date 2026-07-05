@@ -31,7 +31,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Hide Streamlit built-in page navigation — must run before any other render ──
+# ── Hide nav, sidebar, and toggle arrow — injected before anything else renders ──
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"],
@@ -39,7 +39,9 @@ st.markdown("""
 [data-testid="stSidebarNavLink"],
 section[data-testid="stSidebar"] > div:first-child > div:first-child,
 .st-emotion-cache-1oe5cao,
-nav[data-testid="stSidebarNav"] {
+nav[data-testid="stSidebarNav"],
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"] {
     display: none !important;
     visibility: hidden !important;
 }
@@ -338,18 +340,30 @@ if not _history:
     st.info("No historical runs with both ET and DA found. Log runs with timeslips on the main page to enable predictions.")
     st.stop()
 
-# ── Outlier detection (±2 SD on ET) ──────────────────────────────────────────
-_all_ets  = [r["et"] for r in _history]
-_mean_et  = sum(_all_ets) / len(_all_ets)
-_n        = len(_all_ets)
-_sd_et    = math.sqrt(sum((e - _mean_et) ** 2 for e in _all_ets) / _n) if _n > 1 else 0.0
-_threshold = 2.0 * _sd_et
+# ── Outlier detection — IQR method (resistant to outlier-inflated mean) ───────
+_all_ets = sorted(r["et"] for r in _history)
+_n       = len(_all_ets)
+
+def _percentile(data, pct):
+    """Linear interpolation percentile on a sorted list."""
+    if len(data) == 1:
+        return data[0]
+    k = (len(data) - 1) * pct / 100
+    lo, hi = int(k), min(int(k) + 1, len(data) - 1)
+    return data[lo] + (data[hi] - data[lo]) * (k - lo)
+
+_q1  = _percentile(_all_ets, 25)
+_q3  = _percentile(_all_ets, 75)
+_iqr = _q3 - _q1
+_lo_fence = _q1 - 1.5 * _iqr
+_hi_fence = _q3 + 1.5 * _iqr
+_mean_et  = sum(_all_ets) / _n  # kept for display only
 
 included = []
 excluded = []
 for r in _history:
-    if _sd_et > 0 and abs(r["et"] - _mean_et) > _threshold:
-        excluded.append({**r, "status": "excluded — likely aborted or anomalous run"})
+    if r["et"] < _lo_fence or r["et"] > _hi_fence:
+        excluded.append({**r, "status": "excluded — outlier (IQR method)"})
     else:
         included.append({**r, "status": "included"})
 
@@ -402,7 +416,7 @@ else:
         if excluded:
             st.markdown(
                 f"<p style='color:#888;font-size:0.82rem;margin-top:12px;'>"
-                f"⚠️ {len(excluded)} run(s) excluded as outliers (ET more than 2 SD from mean).</p>",
+                f"⚠️ {len(excluded)} run(s) excluded as outliers (IQR method · fences: {_lo_fence:.3f}s – {_hi_fence:.3f}s).</p>",
                 unsafe_allow_html=True,
             )
 
@@ -470,6 +484,6 @@ else:
     st.markdown(
         f"<p style='color:#555;font-size:0.8rem;margin-top:8px;'>"
         f"{len(included)} runs included · {len(excluded)} excluded · "
-        f"Mean ET {_mean_et:.3f}s · ±2 SD threshold {_threshold:.3f}s</p>",
+        f"Q1 {_q1:.3f}s · Q3 {_q3:.3f}s · IQR {_iqr:.3f}s · fences {_lo_fence:.3f}–{_hi_fence:.3f}s</p>",
         unsafe_allow_html=True,
     )
