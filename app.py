@@ -26,23 +26,8 @@ st.set_page_config(
     page_title="RaceFusion",
     page_icon="🏁",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
-
-# ── Hide Streamlit built-in page navigation — must run before any other render ──
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"],
-[data-testid="stSidebarNavItems"],
-[data-testid="stSidebarNavLink"],
-section[data-testid="stSidebar"] > div:first-child > div:first-child,
-.st-emotion-cache-1oe5cao,
-nav[data-testid="stSidebarNav"] {
-    display: none !important;
-    visibility: hidden !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
 # ── Logo loader ───────────────────────────────────────────────────────────────
 def _load_logo_b64(filename: str = "racefusion_logo.png") -> str | None:
@@ -279,8 +264,6 @@ hr { border-color: #2a1a1a !important; }
 ::-webkit-scrollbar-track { background: #0d0d14; }
 ::-webkit-scrollbar-thumb { background: #3a1a1a; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #cc1111; }
-/* ── Hide built-in Streamlit page nav ── */
-[data-testid="stSidebarNav"] { display: none !important; }
 /* ── Multiselect tags ── */
 [data-baseweb="tag"] {
     background-color: #2a0a0a !important;
@@ -356,8 +339,6 @@ li[role="option"] * { color: inherit !important; }
     else:
         css = """
 <style>
-/* ── Hide built-in Streamlit page nav ── */
-[data-testid="stSidebarNav"] { display: none !important; }
 .stApp, [data-testid="stAppViewContainer"] {
     background-color: #f5f5f7 !important;
 }
@@ -526,8 +507,9 @@ else:
 
 # ── Upload session state — initialize once, never undefined ──────────────────
 for _k, _v in {
-    "active_run_id": None,  # canonical active run filename
-    "upload_gen":    0,     # incremented by Save & Close to reset form state
+    "active_run_id":  None,        # canonical active run filename
+    "upload_gen":     0,           # incremented by Save & Close to reset form state
+    "current_page":   "dashboard", # "dashboard" | "predictor"
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -967,6 +949,93 @@ def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pres
     return DA  # feet
 
 
+# ── Race Day Predictor helpers ────────────────────────────────────────────────
+
+def fetch_current_weather(lat: float, lon: float) -> dict:
+    """Fetch live conditions from Open-Meteo forecast API (not archive)."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude":         lat,
+        "longitude":        lon,
+        "current":          "temperature_2m,relativehumidity_2m,surface_pressure,windspeed_10m",
+        "temperature_unit": "fahrenheit",
+        "windspeed_unit":   "mph",
+        "timezone":         "auto",
+    }
+    r   = requests.get(url, params=params, timeout=15)
+    cur = r.json().get("current", {})
+    return {
+        "temperature_f": cur.get("temperature_2m"),
+        "humidity_pct":  cur.get("relativehumidity_2m"),
+        "pressure_hpa":  cur.get("surface_pressure"),
+        "windspeed_mph": cur.get("windspeed_10m"),
+    }
+
+
+def _rdp_load_run_history(username: str) -> list[dict]:
+    """Return all runs for username that have both a valid ET and a DA."""
+    if not _sb:
+        return []
+    try:
+        rows = _sb.table("runs").select("run_data,created_at").eq("username", username).execute().data
+    except Exception:
+        return []
+    results = []
+    for row in rows:
+        rec  = row.get("run_data") or {}
+        slip = rec.get("timeslip", {}) or {}
+        wx   = rec.get("weather",  {}) or {}
+        try:
+            et = float(slip.get("ft_1320") or 0)
+        except (TypeError, ValueError):
+            continue
+        if et <= 0:
+            continue
+        da = slip.get("density_alt_ft") or wx.get("density_alt_ft")
+        if da is None:
+            da = calc_density_altitude(wx.get("temperature_f"), wx.get("humidity_pct"), wx.get("pressure_hpa"))
+        if da is None:
+            continue
+        results.append({
+            "date":  slip.get("date") or row.get("created_at", "")[:10],
+            "track": slip.get("track_name") or slip.get("track_location") or "—",
+            "et":    et,
+            "da":    float(da),
+        })
+    return results
+
+
+def _rdp_percentile(data: list, pct: float) -> float:
+    if len(data) == 1:
+        return data[0]
+    k  = (len(data) - 1) * pct / 100
+    lo = int(k)
+    hi = min(lo + 1, len(data) - 1)
+    return data[lo] + (data[hi] - data[lo]) * (k - lo)
+
+
+def _rdp_linear_regression(xs: list, ys: list):
+    n = len(xs)
+    if n < 2:
+        return None, None
+    sx  = sum(xs);  sy  = sum(ys)
+    sxy = sum(x * y for x, y in zip(xs, ys))
+    sxx = sum(x * x for x in xs)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return None, None
+    slope     = (n * sxy - sx * sy) / denom
+    intercept = (sy - slope * sx) / n
+    return slope, intercept
+
+
+def _rdp_r_squared(xs, ys, slope, intercept) -> float:
+    mean_y = sum(ys) / len(ys)
+    ss_tot = sum((y - mean_y) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    return 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+
 def detect_shift_points(df, time_col: str, rpm_col: str = "Engine RPM",
                         min_rpm_drop: int = 700, post_window_s: float = 0.45,
                         min_shift_rpm: int = 3200, debounce_s: float = 0.8) -> list[dict]:
@@ -1179,8 +1248,15 @@ if _theme_col2.button("☀️ Light" if _dark_mode else "🌑 Dark", key="theme_
     st.session_state["dark_mode"] = not _dark_mode
     st.rerun()
 
-if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
-    st.switch_page("pages/2_Race_Day_Predictor.py")
+_cur_page = st.session_state.get("current_page", "dashboard")
+if _cur_page == "dashboard":
+    if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
+        st.session_state["current_page"] = "predictor"
+        st.rerun()
+else:
+    if st.sidebar.button("📊 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
+        st.session_state["current_page"] = "dashboard"
+        st.rerun()
 
 st.sidebar.markdown("---")
 
@@ -1798,6 +1874,181 @@ if _admin_user == "weeber70" and _sb:
 
         except Exception as _admin_err:
             st.warning(f"Admin data unavailable: {_admin_err}")
+
+# ── Race Day Predictor page ───────────────────────────────────────────────────
+if st.session_state.get("current_page") == "predictor":
+    import urllib.parse as _rdp_urlparse
+
+    st.markdown("# 🏁 Race Day Predictor")
+    st.markdown(
+        "<p style='color:#888;margin-top:-12px;'>Predicted ET and suggested dial based on your car's history + today's air.</p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+
+    # ── Current Conditions ────────────────────────────────────────────────────
+    st.markdown("## 🌤️ Current Conditions")
+    _rdp_cfg        = cfg   # cfg already loaded above
+    _rdp_lat        = _rdp_cfg.get("lat")
+    _rdp_lon        = _rdp_cfg.get("lon")
+    _rdp_loc_label  = _rdp_cfg.get("location_label", "") or _rdp_cfg.get("location_name", "")
+
+    if not _rdp_lat or not _rdp_lon:
+        st.warning("No track location set. Go to Track Location in the sidebar and save your location.")
+    else:
+        st.caption(f"📍 {_rdp_loc_label}")
+
+        if "rdp_weather" not in st.session_state:
+            st.session_state["rdp_weather"] = None
+
+        if st.button("🔄 Refresh Weather", type="secondary", key="rdp_refresh"):
+            st.session_state["rdp_weather"] = None
+
+        if st.session_state["rdp_weather"] is None:
+            with st.spinner("Fetching current conditions…"):
+                try:
+                    st.session_state["rdp_weather"] = fetch_current_weather(float(_rdp_lat), float(_rdp_lon))
+                except Exception as _rdp_wx_err:
+                    st.error(f"Weather fetch failed: {_rdp_wx_err}")
+                    st.session_state["rdp_weather"] = {}
+
+        _rdp_wx  = st.session_state["rdp_weather"] or {}
+        _rdp_da  = calc_density_altitude(_rdp_wx.get("temperature_f"), _rdp_wx.get("humidity_pct"), _rdp_wx.get("pressure_hpa"))
+
+        _rc1, _rc2, _rc3, _rc4 = st.columns(4)
+        _rc1.metric("🌡️ Temperature",  f"{_rdp_wx['temperature_f']:.1f} °F"            if _rdp_wx.get("temperature_f") is not None else "—")
+        _rc2.metric("💧 Humidity",      f"{_rdp_wx['humidity_pct']:.0f}%"               if _rdp_wx.get("humidity_pct")  is not None else "—")
+        _rc3.metric("📊 Baro Pressure", f"{_rdp_wx['pressure_hpa'] * 0.02953:.2f} inHg" if _rdp_wx.get("pressure_hpa") is not None else "—")
+        _rc4.metric("📐 Density Alt",   f"{_rdp_da:,.0f} ft"                             if _rdp_da is not None else "—")
+
+        st.markdown("---")
+
+        # ── ET Prediction ─────────────────────────────────────────────────────
+        st.markdown("## 🎯 ET Prediction")
+
+        if _rdp_da is None:
+            st.warning("Cannot compute DA — check that weather data loaded correctly.")
+        else:
+            _rdp_history = _rdp_load_run_history(_current_user)
+
+            if not _rdp_history:
+                st.info("No historical runs with both ET and DA found. Log runs with timeslips to enable predictions.")
+            else:
+                # IQR outlier detection
+                _rdp_all_ets = sorted(r["et"] for r in _rdp_history)
+                _rdp_n       = len(_rdp_all_ets)
+                _rdp_q1      = _rdp_percentile(_rdp_all_ets, 25)
+                _rdp_q3      = _rdp_percentile(_rdp_all_ets, 75)
+                _rdp_iqr     = _rdp_q3 - _rdp_q1
+                _rdp_lo      = _rdp_q1 - 1.5 * _rdp_iqr
+                _rdp_hi      = _rdp_q3 + 1.5 * _rdp_iqr
+                _rdp_mean_et = sum(_rdp_all_ets) / _rdp_n
+
+                _rdp_included = []
+                _rdp_excluded = []
+                for _rdp_r in _rdp_history:
+                    if _rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi:
+                        _rdp_excluded.append({**_rdp_r, "status": "excluded — outlier (IQR method)"})
+                    else:
+                        _rdp_included.append({**_rdp_r, "status": "included"})
+
+                _rdp_n_incl = len(_rdp_included)
+                if _rdp_n_incl < 2:
+                    st.warning("Not enough clean runs for regression (need at least 2 after outlier removal).")
+                else:
+                    _rdp_xs = [r["da"] for r in _rdp_included]
+                    _rdp_ys = [r["et"] for r in _rdp_included]
+                    _rdp_slope, _rdp_intercept = _rdp_linear_regression(_rdp_xs, _rdp_ys)
+
+                    if _rdp_slope is None:
+                        st.error("Regression failed — all runs may have identical DA values.")
+                    else:
+                        _rdp_r2       = _rdp_r_squared(_rdp_xs, _rdp_ys, _rdp_slope, _rdp_intercept)
+                        _rdp_pred_et  = _rdp_slope * _rdp_da + _rdp_intercept
+                        _rdp_dial     = _rdp_pred_et + 0.02
+
+                        if _rdp_n_incl < 5:
+                            _rdp_conf_label  = "⚠️ Low confidence"
+                            _rdp_conf_detail = "— log more runs for accurate predictions"
+                            _rdp_conf_color  = "#cc8800"
+                        elif _rdp_n_incl < 15:
+                            _rdp_conf_label  = "🟡 Moderate confidence"
+                            _rdp_conf_detail = f"— based on {_rdp_n_incl} runs"
+                            _rdp_conf_color  = "#ccaa00"
+                        else:
+                            _rdp_conf_label  = "🟢 High confidence"
+                            _rdp_conf_detail = f"— based on {_rdp_n_incl} runs"
+                            _rdp_conf_color  = "#22aa55"
+
+                        _rp1, _rp2, _rp3 = st.columns(3)
+                        _rp1.metric("Predicted ET",      f"{_rdp_pred_et:.3f} s")
+                        _rp2.metric("Suggested Dial",    f"{_rdp_dial:.3f} s", help="+0.02 s buffer to help avoid breakout")
+                        _rp3.metric("Today's DA",        f"{_rdp_da:,.0f} ft")
+
+                        st.markdown(
+                            f"<div style='margin-top:4px;font-size:0.9rem;'>"
+                            f"<span style='color:{_rdp_conf_color};font-weight:700;'>{_rdp_conf_label}</span>"
+                            f"<span style='color:#888;'> {_rdp_conf_detail} &nbsp;·&nbsp; R² = {_rdp_r2:.3f}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if _rdp_excluded:
+                            st.markdown(
+                                f"<p style='color:#888;font-size:0.82rem;margin-top:12px;'>"
+                                f"⚠️ {len(_rdp_excluded)} run(s) excluded as outliers "
+                                f"(IQR fences: {_rdp_lo:.3f}s – {_rdp_hi:.3f}s).</p>",
+                                unsafe_allow_html=True,
+                            )
+
+                st.markdown("---")
+
+                # ── Run History Table ─────────────────────────────────────────
+                st.markdown("## 📋 Run History Used in Prediction")
+                _rdp_display = []
+                for _rdp_r in _rdp_included:
+                    _rdp_display.append({**_rdp_r, "status": "✅ Included"})
+                for _rdp_r in _rdp_excluded:
+                    _rdp_display.append(_rdp_r)
+                _rdp_display.sort(key=lambda x: x["date"], reverse=True)
+
+                _rdp_rows_html = ""
+                for _rdp_row in _rdp_display:
+                    _is_ex   = _rdp_row["status"].startswith("excluded")
+                    _rc      = "#555" if _is_ex else "#ddd"
+                    _sc      = "#888" if _is_ex else "#4caf50"
+                    _op      = "0.55" if _is_ex else "1"
+                    _st_lbl  = f"❌ {_rdp_row['status']}" if _is_ex else "✅ Included"
+                    _rdp_rows_html += (
+                        f"<tr style='opacity:{_op};'>"
+                        f"<td style='padding:5px 10px 5px 0;color:{_rc};'>{_rdp_row['date']}</td>"
+                        f"<td style='padding:5px 10px;color:{_rc};'>{_rdp_row['track']}</td>"
+                        f"<td style='padding:5px 10px;color:{_rc};text-align:right;'>{_rdp_row['et']:.3f}</td>"
+                        f"<td style='padding:5px 10px;color:{_rc};text-align:right;'>{_rdp_row['da']:,.0f}</td>"
+                        f"<td style='padding:5px 0;color:{_sc};font-size:0.85rem;'>{_st_lbl}</td>"
+                        f"</tr>"
+                    )
+                st.markdown(f"""
+<div style="border:1px solid #1e1e2a;border-radius:10px;padding:16px 20px;background:#0a0a14;overflow-x:auto;">
+<table style="width:100%;border-collapse:collapse;font-size:0.9rem;font-family:monospace;">
+<thead><tr style="border-bottom:1px solid #2a2a3a;">
+  <th style="color:#666;text-align:left;padding:4px 10px 8px 0;">Date</th>
+  <th style="color:#666;text-align:left;padding:4px 10px 8px;">Track</th>
+  <th style="color:#666;text-align:right;padding:4px 10px 8px;">ET (s)</th>
+  <th style="color:#666;text-align:right;padding:4px 10px 8px;">DA (ft)</th>
+  <th style="color:#666;text-align:left;padding:4px 0 8px;">Status</th>
+</tr></thead>
+<tbody>{_rdp_rows_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+                st.markdown(
+                    f"<p style='color:#555;font-size:0.8rem;margin-top:8px;'>"
+                    f"{_rdp_n_incl} runs included · {len(_rdp_excluded)} excluded · "
+                    f"Q1 {_rdp_q1:.3f}s · Q3 {_rdp_q3:.3f}s · "
+                    f"fences {_rdp_lo:.3f}–{_rdp_hi:.3f}s</p>",
+                    unsafe_allow_html=True,
+                )
+
+    st.stop()  # Don't render the dashboard when on predictor page
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
