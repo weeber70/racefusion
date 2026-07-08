@@ -370,6 +370,114 @@ _SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 _SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 _sb = _sb_create_client(_SUPABASE_URL, _SUPABASE_KEY) if (_sb_create_client and _SUPABASE_URL and _SUPABASE_KEY) else None
 
+# ── App-wide constants ────────────────────────────────────────────────────────
+_ADMIN_USER = "weeber70"
+
+# ── Session helpers (persist login across browser refresh) ────────────────────
+import uuid as _uuid
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+_SESSION_TTL_HOURS = 24
+
+import sys as _sys_rf  # available throughout the module for debug prints
+
+def _create_session_token(username: str) -> str | None:
+    """Upsert a session token into the sessions table; return the token."""
+    if not _sb:
+        print("[RF-SESSION] _sb is None — cannot create session token", file=_sys_rf.stderr, flush=True)
+        return None
+    tok = str(_uuid.uuid4())
+    expires = (_dt.now(_tz.utc) + _td(hours=_SESSION_TTL_HOURS)).isoformat()
+    print(f"[RF-SESSION] creating token for {username!r}  expires={expires}", file=_sys_rf.stderr, flush=True)
+    try:
+        _sb.table("sessions").upsert(
+            {"username": username, "session_token": tok,
+             "expires_at": expires, "last_seen": "now()"},
+            on_conflict="username",
+        ).execute()
+        print(f"[RF-SESSION] token stored OK: {tok[:8]}…", file=_sys_rf.stderr, flush=True)
+        return tok
+    except Exception as _e:
+        print(f"[RF-SESSION] ❌ token write FAILED: {_e}", file=_sys_rf.stderr, flush=True)
+        return None
+
+def _restore_session_from_token(token: str) -> str | None:
+    """Validate a session token. Returns username if valid/not-expired, else None."""
+    if not _sb:
+        print("[RF-SESSION] _sb is None — cannot restore session", file=_sys_rf.stderr, flush=True)
+        return None
+    if not token:
+        return None
+    print(f"[RF-SESSION] validating token {token[:8]}…", file=_sys_rf.stderr, flush=True)
+    try:
+        rows = _sb.table("sessions").select("username,expires_at") \
+                  .eq("session_token", token).execute().data
+        print(f"[RF-SESSION] token lookup result: {rows}", file=_sys_rf.stderr, flush=True)
+        if not rows:
+            print("[RF-SESSION] token not found in sessions table", file=_sys_rf.stderr, flush=True)
+            return None
+        row = rows[0]
+        exp_str = row.get("expires_at") or ""
+        if exp_str:
+            exp_dt = _dt.fromisoformat(exp_str.replace("Z", "+00:00"))
+            if _dt.now(_tz.utc) > exp_dt:
+                print(f"[RF-SESSION] token expired at {exp_str}", file=_sys_rf.stderr, flush=True)
+                _sb.table("sessions").update({"session_token": None, "expires_at": None}) \
+                   .eq("username", row["username"]).execute()
+                return None
+        _sb.table("sessions").update({"last_seen": "now()"}) \
+           .eq("username", row["username"]).execute()
+        print(f"[RF-SESSION] ✅ restored as {row['username']!r}", file=_sys_rf.stderr, flush=True)
+        return row["username"]
+    except Exception as _e:
+        print(f"[RF-SESSION] ❌ token validation FAILED: {_e}", file=_sys_rf.stderr, flush=True)
+        return None
+
+def _delete_session_token(token: str):
+    """Clear the session token on logout (keep the sessions row for admin last_seen)."""
+    if not _sb or not token: return
+    print(f"[RF-SESSION] deleting token {token[:8]}… on logout", file=_sys_rf.stderr, flush=True)
+    try:
+        _sb.table("sessions").update({"session_token": None, "expires_at": None}) \
+           .eq("session_token", token).execute()
+    except Exception as _e:
+        print(f"[RF-SESSION] token delete failed: {_e}", file=_sys_rf.stderr, flush=True)
+
+# ── Maintenance-mode helpers (Supabase-backed, admin-controlled) ──────────────
+# No @st.cache_data — the read is lightweight and we need guaranteed freshness
+# when the admin flips the toggle. Streamlit re-runs the full script on every
+# interaction anyway, so each page action gets a fresh read.
+def _read_maintenance_mode() -> bool:
+    """Read maintenance_mode flag directly from site_settings (no cache)."""
+    if not _sb:
+        print("[RF-MAINT] _sb is None — defaulting to maintenance OFF", file=_sys_rf.stderr, flush=True)
+        return False
+    try:
+        rows = _sb.table("site_settings").select("value") \
+                  .eq("key", "maintenance_mode").execute().data
+        result = bool(rows and rows[0].get("value") == "true")
+        print(f"[RF-MAINT] read maintenance_mode={result!r}  raw={rows}", file=_sys_rf.stderr, flush=True)
+        return result
+    except Exception as _e:
+        print(f"[RF-MAINT] ❌ read FAILED: {_e}  (site_settings table may not exist — run create_sessions_table.sql)", file=_sys_rf.stderr, flush=True)
+        return False
+
+def _write_maintenance_mode(enabled: bool):
+    """Persist maintenance_mode to site_settings."""
+    if not _sb:
+        print("[RF-MAINT] _sb is None — cannot write", file=_sys_rf.stderr, flush=True)
+        return
+    print(f"[RF-MAINT] writing maintenance_mode={'true' if enabled else 'false'}", file=_sys_rf.stderr, flush=True)
+    try:
+        _sb.table("site_settings").upsert(
+            {"key": "maintenance_mode", "value": "true" if enabled else "false",
+             "updated_at": "now()"},
+            on_conflict="key",
+        ).execute()
+        print("[RF-MAINT] ✅ write OK", file=_sys_rf.stderr, flush=True)
+    except Exception as _e:
+        print(f"[RF-MAINT] ❌ write FAILED: {_e}  (site_settings table may not exist — run create_sessions_table.sql)", file=_sys_rf.stderr, flush=True)
+
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 import hashlib, secrets as _secrets
 
@@ -413,6 +521,32 @@ def _register_user(username: str, password: str) -> bool:
 if "rf_user" not in st.session_state:
     st.session_state["rf_user"] = None
 
+# Debug: show what's in URL params on every load
+print(
+    f"[RF-AUTH] page load  rf_user={st.session_state['rf_user']!r}  "
+    f"query_params={dict(st.query_params)}",
+    file=_sys_rf.stderr, flush=True,
+)
+
+# Try to restore login from session token stored in URL
+if st.session_state["rf_user"] is None:
+    _sess_param = st.query_params.get("session", "")
+    print(f"[RF-AUTH] rf_user is None — session param={_sess_param!r}", file=_sys_rf.stderr, flush=True)
+    if _sess_param:
+        _restored_user = _restore_session_from_token(_sess_param)
+        if _restored_user:
+            st.session_state["rf_user"]       = _restored_user
+            st.session_state["session_token"] = _sess_param
+            # Restore current_page from URL if present
+            _p_param = st.query_params.get("p", "")
+            if _p_param in ("dashboard", "predictor", "season"):
+                st.session_state["current_page"] = _p_param
+            print(f"[RF-AUTH] ✅ session restored as {_restored_user!r}  page={_p_param!r}", file=_sys_rf.stderr, flush=True)
+        else:
+            # Invalid / expired token — remove it from URL
+            print("[RF-AUTH] token invalid/expired — clearing from URL", file=_sys_rf.stderr, flush=True)
+            st.query_params.pop("session", None)
+
 if st.session_state["rf_user"] is None:
     # ── Inject minimal dark theme for login page ──────────────────────────────
     st.markdown("""<style>
@@ -447,6 +581,14 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 
     _auth_tab_login, _auth_tab_reg = st.tabs(["Log In", "Create Account"])
 
+    def _do_login(username: str):
+        """Set session state and write session token after successful auth."""
+        st.session_state["rf_user"] = username
+        _tok = _create_session_token(username)
+        if _tok:
+            st.session_state["session_token"] = _tok
+            st.query_params["session"] = _tok
+
     with _auth_tab_login:
         st.markdown("### Log In")
         _li_user = st.text_input("Username", key="li_user", placeholder="your username")
@@ -454,7 +596,7 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
         if st.button("Log In", type="primary", key="li_btn"):
             _u = _li_user.strip().lower()
             if _verify_login(_u, _li_pass):
-                st.session_state["rf_user"] = _u
+                _do_login(_u)
                 st.rerun()
             elif _check_user_exists(_u):
                 st.error("Incorrect password.")
@@ -463,24 +605,46 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 
     with _auth_tab_reg:
         st.markdown("### Create Account")
-        _reg_user = st.text_input("Choose a username", key="reg_user", placeholder="lowercase, no spaces")
-        _reg_pass = st.text_input("Choose a password", type="password", key="reg_pass", placeholder="••••••••")
-        _reg_pass2 = st.text_input("Confirm password", type="password", key="reg_pass2", placeholder="••••••••")
+        st.caption("All fields are required.")
+        _reg_user  = st.text_input("Username *",          key="reg_user",  placeholder="lowercase, no spaces")
+        _reg_email = st.text_input("Email address *",     key="reg_email", placeholder="you@example.com",
+                                   help="We'll notify you of maintenance windows and updates")
+        _reg_pass  = st.text_input("Password *",          type="password", key="reg_pass",  placeholder="min 6 characters")
+        _reg_pass2 = st.text_input("Confirm password *",  type="password", key="reg_pass2", placeholder="repeat password")
         if st.button("Create Account", type="primary", key="reg_btn"):
-            _u = _reg_user.strip().lower()
+            _u  = _reg_user.strip().lower()
+            _em = _reg_email.strip().lower()
+            # Validate every field before touching the DB
             if not _u:
-                st.error("Username cannot be empty.")
+                st.error("⚠️ Username is required.")
             elif not re.match(r"^[a-z0-9_\-]{2,32}$", _u):
                 st.error("Username must be 2–32 characters: letters, numbers, _ or - only.")
-            elif _check_user_exists(_u):
-                st.error("That username is taken. Please choose another.")
+            elif not _em:
+                st.error("⚠️ Email address is required.")
+            elif not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", _em):
+                st.error("⚠️ Please enter a valid email address (e.g. you@example.com).")
+            elif not _reg_pass:
+                st.error("⚠️ Password is required.")
             elif len(_reg_pass) < 6:
                 st.error("Password must be at least 6 characters.")
+            elif not _reg_pass2:
+                st.error("⚠️ Please confirm your password.")
             elif _reg_pass != _reg_pass2:
-                st.error("Passwords do not match.")
+                st.error("⚠️ Passwords do not match.")
+            elif _check_user_exists(_u):
+                st.error("That username is already taken. Please choose another.")
             else:
                 if _register_user(_u, _reg_pass):
-                    st.session_state["rf_user"] = _u
+                    # Save initial config with email
+                    if _sb:
+                        try:
+                            _sb.table("user_configs").upsert(
+                                {"username": _u, "config": json.dumps({"email": _em})},
+                                on_conflict="username",
+                            ).execute()
+                        except Exception:
+                            pass
+                    _do_login(_u)
                     st.rerun()
                 else:
                     st.error("Registration failed — Supabase may not be configured. Check your .env.")
@@ -490,20 +654,14 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 # ── Logged in ─────────────────────────────────────────────────────────────────
 _current_user: str = st.session_state["rf_user"]
 
-# ── Session heartbeat — upsert last_seen on every page load ──────────────────
-import sys as _sys
-print(f"[RF-DEBUG] current_user={_current_user!r}  rf_user={st.session_state.get('rf_user')!r}", file=_sys.stderr, flush=True)
+# ── Session heartbeat — update last_seen without touching session_token ───────
+# Use UPDATE (not upsert) so we never accidentally NULL out session_token/expires_at
 if _sb:
     try:
-        _sb.table("sessions").upsert(
-            {"username": _current_user, "last_seen": "now()"},
-            on_conflict="username",
-        ).execute()
-        print(f"[RF-DEBUG] sessions upsert OK for {_current_user!r}", file=_sys.stderr, flush=True)
+        _sb.table("sessions").update({"last_seen": "now()"}) \
+           .eq("username", _current_user).execute()
     except Exception as _sess_err:
-        print(f"[RF-DEBUG] sessions upsert FAILED: {_sess_err}", file=_sys.stderr, flush=True)
-else:
-    print("[RF-DEBUG] _sb is None — Supabase not connected", file=_sys.stderr, flush=True)
+        print(f"[RF-DEBUG] sessions last_seen update FAILED: {_sess_err}", file=_sys_rf.stderr, flush=True)
 
 # ── Upload session state — initialize once, never undefined ──────────────────
 for _k, _v in {
@@ -512,7 +670,12 @@ for _k, _v in {
     "current_page":   "dashboard", # "dashboard" | "predictor"
 }.items():
     if _k not in st.session_state:
-        st.session_state[_k] = _v
+        # Restore current_page from URL on refresh
+        if _k == "current_page":
+            _pg_param = st.query_params.get("p", "")
+            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season") else _v
+        else:
+            st.session_state[_k] = _v
 
 # ── Channel groups ────────────────────────────────────────────────────────────
 CHANNEL_GROUPS = {
@@ -784,15 +947,36 @@ def scan_timeslip(image_bytes: bytes, media_type: str, api_key: str, car_number:
     b64 = base64.standard_b64encode(image_bytes).decode()
 
     car_num = car_number.strip()
-    car_hint = ""
+
     if car_num:
-        car_hint = (
-            f"\n\nThe user's car number is \"{car_num}\". "
-            f"If the slip shows two cars (Left lane and Right lane), extract only the timing data "
-            f"for car \"{car_num}\" and ignore the other car's data. "
-            f"Use the car number to determine which lane the user was in, then use that "
-            f"together with the win indicator described below to set the \"result\" field."
-        )
+        _car_section = f"""The user's car number is "{car_num}".
+
+STEP 1 — FIND THE USER'S CAR ON THE SLIP:
+Search the entire timeslip for car number "{car_num}".
+  • Found → set "car_found" to true. Note which lane (Left or Right) it is in and extract
+    ALL timing data for that car only. Ignore the other car's timing rows entirely.
+  • NOT found → set "car_found" to false. Set lane, car_number, dial_in, reaction_time,
+    ft_60, ft_330, ft_660, mph_660, ft_1000, ft_1320, mph_1320, and result all to null.
+    You may still extract date, time, track_name, track_location, and weather fields.
+
+STEP 2 — DETERMINE WIN/LOSS (only when car_found is true):
+
+Compulink timing system (most common): The winner's ET on the 1/4-mile line is followed
+immediately by "<<WIN" (left-lane winner) or ">>WIN" (right-lane winner).
+Example: "6.676  <<WIN" means the left-lane car won.
+Example: "8.341  >>WIN" means the right-lane car won.
+Cross-reference which lane the WIN marker applies to with the user's car lane to determine
+Win or Loss for car "{car_num}".
+
+Other timing systems: look for a printed "W" or "L", "WINNER"/"LOSER" text, a checked
+WIN/LOSS box, or a "BYE" label. Map winner → "Win", loser → "Loss", bye run → "Bye".
+If no result indicator is visible at all, use null."""
+    else:
+        _car_section = """No car number has been configured for this user.
+Set "car_found" to false. Set "result" to null.
+Do NOT attempt to determine Win or Loss.
+Do NOT use any car number printed on the slip to make assumptions about the user.
+You may still extract date, time, track_name, track_location, and weather fields."""
 
     prompt = f"""You are reading a drag racing timeslip. Extract every field you can see.
 Return a JSON object with these keys (use null for anything not visible):
@@ -801,6 +985,7 @@ Return a JSON object with these keys (use null for anything not visible):
   "time": "HH:MM",
   "track_name": "full track name as printed",
   "track_location": "City, State (or City, Country) — look for address or city/state text near the track name",
+  "car_found": true or false,
   "lane": "left or right",
   "car_number": "...",
   "dial_in": float,
@@ -822,18 +1007,7 @@ Return a JSON object with these keys (use null for anything not visible):
   "issues": "any notes or issues printed on the slip" or null
 }}
 
-HOW TO DETERMINE THE RESULT:
-
-Compulink timing system (most common): The winner's ET on the 1/4-mile line is followed
-immediately by "<<WIN" (left-lane winner) or ">>WIN" (right-lane winner).
-Example: "6.676  <<WIN" means the left-lane car won.
-Example: "8.341  >>WIN" means the right-lane car won.
-If you see "<<WIN" or ">>WIN" anywhere on the slip, use it as the definitive result indicator.
-{f'The user is car number "{car_num}". Identify which lane (Left or Right) that car number appears in, then check which side the WIN marker is on to decide if the result is Win or Loss.' if car_num else 'If only one car is shown, <<WIN means that car won, >>WIN means that car lost.'}
-
-Other timing systems: look for a printed "W" or "L", "WINNER" / "LOSER" text, a checked
-WIN/LOSS box, or a "BYE" label. Map winner → "Win", loser → "Loss", bye run → "Bye".
-If no result indicator is visible at all, use null.
+{_car_section}
 
 ROUND NUMBER: Look for text like "Rnd # E1 9/10", "Round 1", "R2", "Elim 1", or similar
 near the bottom of the slip. Extract just the round label (e.g. "E1", "R1", "Q2") for
@@ -841,7 +1015,7 @@ near the bottom of the slip. Extract just the round label (e.g. "E1", "R1", "Q2"
 
 Many timeslips print weather conditions (temp, barometric pressure, humidity, wind,
 corrected/density altitude) — extract those too if present.
-Return only the JSON object. No markdown, no explanation.{car_hint}"""
+Return only the JSON object. No markdown, no explanation."""
 
     response = client.messages.create(
         model="claude-opus-4-8",
@@ -924,6 +1098,132 @@ def geocode(location: str) -> tuple[float | None, float | None, str]:
     return None, None, location
 
 
+# ── Track lookup with Supabase cache ─────────────────────────────────────────
+# In-process cache so the same track isn't re-queried within one Streamlit render
+_track_cache: dict[str, dict | None] = {}
+
+
+def _track_key(name: str) -> str:
+    """Normalise a track name for deduplication."""
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def lookup_track(track_name: str, city_state: str = "") -> dict | None:
+    """
+    Return {"lat", "lon", "elev_ft", "display_name"} for a drag strip.
+
+    Resolution order:
+      1. In-process memory cache (same render)
+      2. Supabase `tracks` table (persistent cross-user cache)
+      3. Nominatim (OpenStreetMap) — tries drag-racing-specific queries first
+      4. Open-Meteo geocoder with city/state as fallback
+    On success, stores the result in the tracks table for future calls.
+    Returns None if the track cannot be located.
+    """
+    key = _track_key(track_name or city_state)
+    if not key:
+        return None
+
+    # 1. In-process cache
+    if key in _track_cache:
+        return _track_cache[key]
+
+    # 2. Supabase tracks table
+    if _sb:
+        try:
+            rows = _sb.table("tracks").select("*").eq("name_key", key).execute().data
+            if rows:
+                r = rows[0]
+                result = {
+                    "lat": r["lat"], "lon": r["lon"],
+                    "elev_ft": r.get("elev_ft"),
+                    "display_name": r.get("display_name") or track_name,
+                }
+                _track_cache[key] = result
+                return result
+        except Exception:
+            pass  # tracks table may not exist yet — continue to geocode
+
+    # 3. Nominatim (OpenStreetMap) — drag-racing-specific queries
+    lat, lon, display = None, None, track_name or city_state
+
+    queries = []
+    if track_name:
+        queries += [
+            f"{track_name} dragstrip",
+            f"{track_name} dragway",
+            f"{track_name} drag strip",
+        ]
+        if city_state:
+            queries.append(f"{track_name} {city_state}")
+        queries.append(track_name)
+
+    for q in queries:
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "json", "limit": 3,
+                        "addressdetails": "0"},
+                headers={"User-Agent": "RaceFusion/1.0 drag-racing-app"},
+                timeout=10,
+            )
+            hits = r.json()
+            if hits:
+                h = hits[0]
+                lat, lon = float(h["lat"]), float(h["lon"])
+                display = h.get("display_name", track_name) or track_name
+                break
+        except Exception:
+            continue
+
+    # 4. Open-Meteo geocoder fallback (uses city/state, good for small towns)
+    if lat is None and city_state:
+        lat_m, lon_m, label_m = geocode(city_state)
+        if lat_m is not None:
+            lat, lon, display = lat_m, lon_m, label_m or city_state
+
+    if lat is None:
+        _track_cache[key] = None
+        return None
+
+    # Fetch elevation from Open-Meteo
+    elev_ft: float | None = None
+    try:
+        er = requests.get(
+            "https://api.open-meteo.com/v1/elevation",
+            params={"latitude": lat, "longitude": lon},
+            timeout=10,
+        )
+        em = (er.json().get("elevation") or [None])[0]
+        if em is not None:
+            elev_ft = float(em) / 0.3048  # metres → feet
+    except Exception:
+        pass
+
+    # Shorten Nominatim's verbose display_name to something readable
+    short_display = display.split(",")[0].strip() if display else (track_name or city_state)
+
+    result = {"lat": lat, "lon": lon, "elev_ft": elev_ft, "display_name": short_display}
+
+    # Cache in Supabase tracks table (gracefully skip if table missing)
+    if _sb:
+        try:
+            _sb.table("tracks").upsert({
+                "name_key":    key,
+                "display_name": short_display,
+                "lat":         lat,
+                "lon":         lon,
+                "elev_ft":     elev_ft,
+                "city_state":  city_state or "",
+                "source":      "nominatim" if display != (track_name or city_state) else "open-meteo",
+            }, on_conflict="name_key").execute()
+        except Exception:
+            pass  # non-fatal — operate without persistent caching
+
+    _track_cache[key] = result
+    return result
+
+
 # ── Historical weather ────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Fetching weather…")
 def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict:
@@ -934,7 +1234,7 @@ def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict
         "longitude": lon,
         "start_date": date_str,
         "end_date": date_str,
-        "hourly": "temperature_2m,relativehumidity_2m,surface_pressure,windspeed_10m,winddirection_10m",
+        "hourly": "temperature_2m,dewpoint_2m,relativehumidity_2m,surface_pressure,windspeed_10m,winddirection_10m",
         "temperature_unit": "fahrenheit",
         "windspeed_unit": "mph",
         "timezone": "auto",
@@ -950,9 +1250,23 @@ def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict
         arr = hourly.get(key, [])
         return arr[idx] if idx < len(arr) else None
 
+    # Derive RH from dewpoint+temp (August-Roche-Magnus) for best accuracy.
+    # temperature_unit=fahrenheit applies to temperature_2m and dewpoint_2m.
+    _omw_temp_f  = val("temperature_2m")
+    _omw_dewp_f  = val("dewpoint_2m")
+    humidity_pct = None
+    if _omw_temp_f is not None and _omw_dewp_f is not None:
+        import math as _math
+        _omw_t_c = (_omw_temp_f - 32) * 5 / 9
+        _omw_d_c = (_omw_dewp_f - 32) * 5 / 9
+        _magnus  = lambda t: _math.exp(17.625 * t / (243.04 + t))
+        humidity_pct = min(100.0, 100.0 * _magnus(_omw_d_c) / _magnus(_omw_t_c))
+    if humidity_pct is None:
+        humidity_pct = val("relativehumidity_2m")  # fallback
+
     return {
-        "temperature_f": val("temperature_2m"),
-        "humidity_pct":  val("relativehumidity_2m"),
+        "temperature_f": _omw_temp_f,
+        "humidity_pct":  humidity_pct,
         "pressure_hpa":  val("surface_pressure"),
         "windspeed_mph": val("windspeed_10m"),
         "wind_dir_deg":  val("winddirection_10m"),
@@ -987,7 +1301,7 @@ def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pres
     P_pa  = pressure_hpa * 100.0              # hPa → Pa
     RH    = humidity_pct / 100.0
     # Saturation vapor pressure (Magnus formula)
-    e_s   = 610.78 * math.exp(17.27 * T_c / (T_c + 237.3))
+    e_s   = 610.78 * math.exp(17.625 * T_c / (243.04 + T_c))  # August-Roche-Magnus
     e_pa  = RH * e_s                          # actual vapor pressure (Pa)
     P_dry = P_pa - e_pa                       # dry-air partial pressure (Pa)
     # Dry-air density only — motorsports standard, matches airdensityonline.com
@@ -1004,7 +1318,7 @@ def _fetch_omw_current(lat: float, lon: float) -> dict:
     params = {
         "latitude":         lat,
         "longitude":        lon,
-        "current":          "temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m",
+        "current":          "temperature_2m,dew_point_2m,relative_humidity_2m,surface_pressure,wind_speed_10m",
         "forecast_days":    1,
         "temperature_unit": "fahrenheit",
         "windspeed_unit":   "mph",
@@ -1013,9 +1327,20 @@ def _fetch_omw_current(lat: float, lon: float) -> dict:
     try:
         r   = requests.get(url, params=params, timeout=15)
         cur = r.json().get("current", {})
+        _fc_temp_f = cur.get("temperature_2m")
+        _fc_dewp_f = cur.get("dew_point_2m")
+        _fc_hum    = None
+        if _fc_temp_f is not None and _fc_dewp_f is not None:
+            import math as _math
+            _fc_t_c  = (_fc_temp_f - 32) * 5 / 9
+            _fc_d_c  = (_fc_dewp_f - 32) * 5 / 9
+            _magnus  = lambda t: _math.exp(17.625 * t / (243.04 + t))
+            _fc_hum  = min(100.0, 100.0 * _magnus(_fc_d_c) / _magnus(_fc_t_c))
+        if _fc_hum is None:
+            _fc_hum = cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m")
         return {
-            "temperature_f": cur.get("temperature_2m"),
-            "humidity_pct":  cur.get("relative_humidity_2m") or cur.get("relativehumidity_2m"),
+            "temperature_f": _fc_temp_f,
+            "humidity_pct":  _fc_hum,
             "pressure_hpa":  cur.get("surface_pressure"),
             "windspeed_mph": cur.get("wind_speed_10m") or cur.get("windspeed_10m"),
             "_source":       "open-meteo",
@@ -1103,7 +1428,15 @@ def fetch_metar(lat: float, lon: float) -> dict:
 
     # ── Step 4: parse fields ──────────────────────────────────────────────────
     temp_c  = float(best["temp"])
-    dewp_c  = best.get("dewp")
+    # NOAA JSON may use "dewp" (°C), "dwpc" (°C), or "dwpf" (°F) depending on format version.
+    dewp_c: float | None = None
+    if best.get("dewp") is not None:
+        dewp_c = float(best["dewp"])
+    elif best.get("dwpc") is not None:
+        dewp_c = float(best["dwpc"])
+    elif best.get("dwpf") is not None:
+        dewp_c = (float(best["dwpf"]) - 32) * 5 / 9   # Fahrenheit → Celsius
+
     altim   = float(best["altim"])          # hPa (altimeter setting / QNH, sea-level corrected)
     elev_ft = float(best.get("elev") or 0) # METAR station elevation, feet (fallback)
     icao    = best.get("icaoId") or best.get("id") or "???"
@@ -1113,10 +1446,26 @@ def fetch_metar(lat: float, lon: float) -> dict:
 
     temp_f = temp_c * 9 / 5 + 32
 
-    # RH from dewpoint (Magnus formula)
-    if dewp_c is not None:
-        _e           = lambda t: math.exp(17.27 * float(t) / (float(t) + 237.3))
-        humidity_pct = min(100.0, 100.0 * _e(dewp_c) / _e(temp_c))
+    # Debug: print raw METAR fields so we can verify what the API returns.
+    import sys as _sys_metar
+    print(
+        f"[METAR-DEBUG] station={icao}  temp={best.get('temp')}°C  "
+        f"dewp={best.get('dewp')}  dwpc={best.get('dwpc')}  dwpf={best.get('dwpf')}  "
+        f"relHum={best.get('relHum')}  altim={best.get('altim')} hPa  elev={best.get('elev')} ft  "
+        f"keys={sorted(k for k in best if best[k] is not None)}",
+        file=_sys_metar.stderr, flush=True,
+    )
+
+    # RH priority:
+    #   1. relHum from NOAA response — server-computed from full-precision observations
+    #   2. Magnus formula from dewpoint — good when relHum absent
+    _relay_rh = best.get("relHum")
+    if _relay_rh is not None:
+        humidity_pct = min(100.0, float(_relay_rh))
+    elif dewp_c is not None:
+        # August-Roche-Magnus (Alduchov & Eskridge 1996) — matches airdensityonline.com
+        _magnus = lambda t: math.exp(17.625 * float(t) / (243.04 + float(t)))
+        humidity_pct = min(100.0, 100.0 * _magnus(dewp_c) / _magnus(temp_c))
     else:
         humidity_pct = None
 
@@ -1297,11 +1646,56 @@ def calc_rwhp(weight_lbs: float, et: float | None, mph: float | None) -> dict:
 # ── Load config once, before any sidebar widgets that need it ─────────────────
 cfg = load_config()
 
+# ── Maintenance mode (Supabase-backed) ────────────────────────────────────────
+_maintenance_on = _read_maintenance_mode()
+
+if _maintenance_on and _current_user != _ADMIN_USER:
+    # ── Full-screen block for non-admin users ─────────────────────────────────
+    _inject_theme(True)
+    st.markdown("""
+<style>
+[data-testid="stSidebar"]{display:none!important}
+header,[data-testid="stHeader"]{display:none!important}
+.block-container{padding:0!important;max-width:100%!important}
+</style>""", unsafe_allow_html=True)
+
+    _maint_email = cfg.get("email", "")
+    _maint_logo  = _load_logo_b64("RaceFusion.jpg")
+
+    st.markdown(
+        f"""
+<div style="min-height:100vh;background:#08080d;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;padding:40px 24px;text-align:center;">
+  {f'<img src="{_maint_logo}" style="max-width:320px;width:60%;margin-bottom:32px;">'
+   if _maint_logo else '<h1 style="color:#e8e8e8;">🏁 RaceFusion</h1>'}
+  <div style="font-size:2.6rem;margin-bottom:16px;">🏁</div>
+  <h2 style="color:#ffffff;font-size:1.8rem;margin:0 0 12px;">RaceFusion is getting an upgrade</h2>
+  <p style="color:#aaa;font-size:1.1rem;max-width:480px;line-height:1.6;margin:0 0 24px;">
+    We're tuning things up behind the scenes to make your experience faster and better.
+  </p>
+  {"<p style='color:#cc1111;font-size:1rem;'>We'll email you at <strong style='color:#e8e8e8;'>"
+   + _maint_email
+   + "</strong> when we're back on track. 🏎️</p>"
+   if _maint_email else ""}
+</div>""",
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
 # ── Theme toggle (must run before CSS injection) ──────────────────────────────
 if "dark_mode" not in st.session_state:
     st.session_state["dark_mode"] = True
 _dark_mode = st.session_state["dark_mode"]
 _inject_theme(_dark_mode)
+
+# ── weeber70 maintenance banner ───────────────────────────────────────────────
+if _maintenance_on and _current_user == _ADMIN_USER:
+    st.markdown(
+        "<div style='background:#5a1000;color:#ffcccc;padding:10px 18px;border-radius:6px;"
+        "font-weight:600;margin-bottom:12px;'>⚠️ Maintenance mode is ON — "
+        "other users see the maintenance screen.</div>",
+        unsafe_allow_html=True,
+    )
 
 # ── Feedback button — fixed top-right, always visible ────────────────────────
 import urllib.parse as _urlparse
@@ -1423,6 +1817,9 @@ st.sidebar.caption("RacePak Data Dashboard")
 _ub_col1, _ub_col2 = st.sidebar.columns([3, 2])
 _ub_col1.markdown(f"👤 **{_current_user}**")
 if _ub_col2.button("Log Out", key="logout_btn"):
+    _delete_session_token(st.session_state.pop("session_token", None) or "")
+    st.query_params.pop("session", None)
+    st.query_params.pop("p", None)
     st.session_state["rf_user"] = None
     st.rerun()
 
@@ -1433,17 +1830,23 @@ if _theme_col2.button("☀️ Light" if _dark_mode else "🌑 Dark", key="theme_
     st.rerun()
 
 _cur_page = st.session_state.get("current_page", "dashboard")
+# Keep page in URL so it survives browser refresh
+if st.query_params.get("p") != _cur_page:
+    st.query_params["p"] = _cur_page
 if _cur_page != "dashboard":
     if st.sidebar.button("📊 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
         st.session_state["current_page"] = "dashboard"
+        st.query_params["p"] = "dashboard"
         st.rerun()
 if _cur_page != "predictor":
     if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
         st.session_state["current_page"] = "predictor"
+        st.query_params["p"] = "predictor"
         st.rerun()
 if _cur_page != "season":
     if st.sidebar.button("📅 Season Summary", use_container_width=True, key="nav_to_season"):
         st.session_state["current_page"] = "season"
+        st.query_params["p"] = "season"
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -1881,55 +2284,81 @@ elif _active_csv_name:
                     save_run(_active_csv_name, _existing_run)
 
                     # 2. Scan inline — same pattern as Create New Run form
-                    if api_key:
+                    if not car_number_input.strip():
+                        _add_slip_status.write(
+                            "ℹ️ Enter your car number in **Car Profile** to scan timeslips. "
+                            "RaceFusion needs your car number to identify your lane on the timeslip."
+                        )
+                    elif api_key:
                         _add_slip_status.write("🎫 Scanning timeslip…")
                         try:
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
-                            _existing_run["timeslip"] = _scan_result
 
-                            # Auto-populate result from scanned slip (only if not manually set)
-                            _scanned_result = _normalize_slip_result(_scan_result.get("result"))
-                            if _scanned_result:
-                                _rd_auto = _existing_run.get("run_details") or {}
-                                if not _rd_auto.get("result"):
-                                    _rd_auto["result"] = _scanned_result
-                                    _existing_run["run_details"] = _rd_auto
+                            if _scan_result.get("car_found") is False:
+                                # Car not found on slip — save sentinel to avoid re-scanning
+                                _existing_run["timeslip"] = _scan_result
+                                _add_slip_status.update(
+                                    label=f"⚠️ Car #{car_number_input.strip()} not found on timeslip",
+                                    state="error", expanded=True,
+                                )
+                                _add_slip_status.write(
+                                    f"Car number **{car_number_input.strip()}** was not found on this timeslip. "
+                                    "Please verify your car number in Car Profile."
+                                )
+                            else:
+                                _existing_run["timeslip"] = _scan_result
 
-                            # 3. Fetch weather
-                            _slip_date = _scan_result.get("date")
-                            if _slip_date:
-                                _slip_hour = 12
-                                if _scan_result.get("time"):
-                                    try:
-                                        _slip_hour = int(str(_scan_result["time"]).split(":")[0])
-                                    except Exception:
-                                        _slip_hour = 12
-                                _wx_lat, _wx_lon, _wx_label = None, None, ""
-                                _as_track = (_scan_result.get("track_location")
-                                             or _scan_result.get("track_name") or "")
-                                if _as_track:
-                                    _add_slip_status.write(f"📍 Geocoding {_as_track}…")
-                                    _wx_lat, _wx_lon, _wx_label = geocode(_as_track)
-                                if _wx_lat is None and cfg.get("lat"):
-                                    _wx_lat  = cfg["lat"]
-                                    _wx_lon  = cfg["lon"]
-                                    _wx_label = cfg.get("location_label", "")
-                                if _wx_lat is not None:
-                                    _add_slip_status.write("🌤️ Fetching weather…")
-                                    try:
-                                        _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
-                                        _da = calc_density_altitude(
-                                            _wx.get("temperature_f"),
-                                            _wx.get("humidity_pct"),
-                                            _wx.get("pressure_hpa"),
-                                        )
-                                        if _da is not None:
-                                            _wx["density_alt_ft"] = round(_da)
-                                        _existing_run["weather"]          = _wx
-                                        _existing_run["weather_date"]     = _slip_date
-                                        _existing_run["weather_location"] = _wx_label
-                                    except Exception as _wx_e:
-                                        _add_slip_status.write(f"⚠️ Weather unavailable: {_wx_e}")
+                                # Auto-populate result from scanned slip (only if not manually set)
+                                _scanned_result = _normalize_slip_result(_scan_result.get("result"))
+                                if _scanned_result:
+                                    _rd_auto = _existing_run.get("run_details") or {}
+                                    if not _rd_auto.get("result"):
+                                        _rd_auto["result"] = _scanned_result
+                                        _existing_run["run_details"] = _rd_auto
+
+                                # 3. Fetch weather (only when car was found)
+                                _slip_date = _scan_result.get("date")
+                                if _slip_date:
+                                    _slip_hour = 12
+                                    if _scan_result.get("time"):
+                                        try:
+                                            _slip_hour = int(str(_scan_result["time"]).split(":")[0])
+                                        except Exception:
+                                            _slip_hour = 12
+                                    _wx_lat, _wx_lon, _wx_label = None, None, ""
+                                    _tname = _scan_result.get("track_name", "")
+                                    _tloc  = _scan_result.get("track_location", "")
+                                    if _tname or _tloc:
+                                        _add_slip_status.write(f"📍 Looking up {_tname or _tloc}…")
+                                        _tk = lookup_track(_tname, _tloc)
+                                        if _tk:
+                                            _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
+                                            # Auto-save track location to user config
+                                            cfg["location_name"]  = _tname or _tloc
+                                            cfg["location_label"] = _tk["display_name"]
+                                            cfg["lat"] = _tk["lat"]
+                                            cfg["lon"] = _tk["lon"]
+                                            save_config(cfg)
+                                    if _wx_lat is None and cfg.get("lat"):
+                                        _wx_lat  = cfg["lat"]
+                                        _wx_lon  = cfg["lon"]
+                                        _wx_label = cfg.get("location_label", "")
+                                    if _wx_lat is not None:
+                                        _add_slip_status.write("🌤️ Fetching weather…")
+                                        try:
+                                            _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
+                                            _da = calc_density_altitude(
+                                                _wx.get("temperature_f"),
+                                                _wx.get("humidity_pct"),
+                                                _wx.get("pressure_hpa"),
+                                            )
+                                            if _da is not None:
+                                                _wx["density_alt_ft"] = round(_da)
+                                            _existing_run["weather"]          = _wx
+                                            _existing_run["weather_date"]     = _slip_date
+                                            _existing_run["weather_location"] = _wx_label
+                                        except Exception as _wx_e:
+                                            _add_slip_status.write(f"⚠️ Weather unavailable: {_wx_e}")
                         except Exception as _scan_e:
                             _add_slip_status.write(f"⚠️ Scan failed: {_scan_e}")
 
@@ -2005,6 +2434,19 @@ if _admin_user == "weeber70" and _sb:
             except Exception:
                 return ts_str
 
+        # ── Maintenance mode toggle ───────────────────────────────────────────
+        _maint_toggle = st.toggle(
+            "🚧 Maintenance Mode",
+            value=_maintenance_on,
+            key="admin_maint_toggle",
+            help="When ON, all users except weeber70 see the maintenance screen.",
+        )
+        if _maint_toggle != _maintenance_on:
+            _write_maintenance_mode(_maint_toggle)
+            st.rerun()
+
+        st.markdown("---")
+
         try:
             from datetime import datetime, timezone, timedelta
 
@@ -2042,25 +2484,43 @@ if _admin_user == "weeber70" and _sb:
                 _u = _rr.get("username", "")
                 _run_counts[_u] = _run_counts.get(_u, 0) + 1
 
+            # Fetch emails from user_configs
+            _all_emails: dict[str, str] = {}
+            try:
+                _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
+                for _cr in _cfg_rows:
+                    _cfg_blob = _cr.get("config") or {}
+                    if isinstance(_cfg_blob, str):
+                        try: _cfg_blob = json.loads(_cfg_blob)
+                        except Exception: _cfg_blob = {}
+                    _em = _cfg_blob.get("email", "")
+                    if _em:
+                        _all_emails[_cr["username"]] = _em
+            except Exception:
+                pass
+
             _rows_html = ""
             for _cu in sorted(_all_creds, key=lambda x: x["username"]):
                 _un  = _cu["username"]
                 _ls  = _time_ago(_all_sessions.get(_un, ""))
                 _rc  = _run_counts.get(_un, 0)
+                _em  = _all_emails.get(_un, "—")
                 _bold = "font-weight:700;" if _un == "weeber70" else ""
                 _rows_html += (
                     f'<tr>'
                     f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
+                    f'<td style="color:#777;padding:3px 6px;font-size:0.78rem;">{_em}</td>'
                     f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
                     f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
                     f'</tr>'
                 )
 
             st.markdown(f"""
-<div style="font-size:0.82rem;font-family:monospace;">
+<div style="font-size:0.82rem;font-family:monospace;overflow-x:auto;">
 <table style="width:100%;border-collapse:collapse;">
 <thead><tr>
   <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Email</th>
   <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
   <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
 </tr></thead>
@@ -2087,12 +2547,39 @@ if st.session_state.get("current_page") == "predictor":
     _rdp_cfg        = cfg   # cfg already loaded above
     _rdp_lat        = _rdp_cfg.get("lat")
     _rdp_lon        = _rdp_cfg.get("lon")
-    _rdp_loc_label  = _rdp_cfg.get("location_label", "") or _rdp_cfg.get("location_name", "")
+    _rdp_loc_label      = _rdp_cfg.get("location_label", "") or _rdp_cfg.get("location_name", "")
+    _rdp_fallback_label = ""   # set here so it's always defined
+
+    if not _rdp_lat or not _rdp_lon:
+        # Fall back to most recent run's track via lookup_track()
+        if _sb:
+            try:
+                _rdp_recent = (_sb.table("runs")
+                               .select("run_data")
+                               .eq("username", _current_user)
+                               .order("created_at", desc=True)
+                               .limit(20)
+                               .execute().data or [])
+                for _rdp_rr in _rdp_recent:
+                    _rdp_rr_slip = (_rdp_rr.get("run_data") or {}).get("timeslip") or {}
+                    _rdp_rr_tname = _rdp_rr_slip.get("track_name", "")
+                    _rdp_rr_tloc  = _rdp_rr_slip.get("track_location", "")
+                    if _rdp_rr_tname or _rdp_rr_tloc:
+                        _rdp_tk = lookup_track(_rdp_rr_tname, _rdp_rr_tloc)
+                        if _rdp_tk:
+                            _rdp_lat         = _rdp_tk["lat"]
+                            _rdp_lon         = _rdp_tk["lon"]
+                            _rdp_fallback_label = _rdp_tk["display_name"]
+                            break
+            except Exception:
+                pass
 
     if not _rdp_lat or not _rdp_lon:
         st.warning("No track location set. Go to Track Location in the sidebar and save your location.")
     else:
-        st.caption(f"📍 {_rdp_loc_label}")
+        _rdp_display_label = _rdp_fallback_label or _rdp_loc_label
+        st.caption(f"📍 {_rdp_display_label}"
+                   + (" *(from recent run)*" if _rdp_fallback_label else ""))
 
         if "rdp_weather" not in st.session_state:
             st.session_state["rdp_weather"] = None
@@ -2110,6 +2597,56 @@ if st.session_state.get("current_page") == "predictor":
 
         _rdp_wx  = st.session_state["rdp_weather"] or {}
         _rdp_da  = calc_density_altitude(_rdp_wx.get("temperature_f"), _rdp_wx.get("humidity_pct"), _rdp_wx.get("pressure_hpa"))
+
+        # ── Manual station override (computed later, used for prediction) ─────
+        _rdp_mwx = st.session_state.get("rdp_manual_wx") or {}
+        _rdp_manual_active = bool(_rdp_mwx.get("baro_inhg", 0) > 0 and _rdp_mwx.get("rh_pct", 0) > 0)
+        if _rdp_manual_active:
+            _mwx_baro_inhg  = _rdp_mwx.get("baro_inhg", 0)
+            _mwx_temp_f     = _rdp_mwx.get("temp_f", 0)
+            _mwx_rh_pct     = _rdp_mwx.get("rh_pct", 0)
+            _mwx_p_hpa      = _mwx_baro_inhg * 33.8639          # inHg → hPa (no elevation correction)
+            _mwx_p_pa       = _mwx_p_hpa * 100.0
+            _mwx_t_c        = (_mwx_temp_f - 32) * 5 / 9
+            _mwx_t_k        = _mwx_t_c + 273.15
+            _mwx_rh_frac    = _mwx_rh_pct / 100.0
+            _mwx_e_s        = 610.78 * math.exp(17.625 * _mwx_t_c / (243.04 + _mwx_t_c))
+            _mwx_e_pa       = _mwx_rh_frac * _mwx_e_s
+            _mwx_p_dry      = _mwx_p_pa - _mwx_e_pa
+            _mwx_rho        = _mwx_p_dry / (287.058 * _mwx_t_k)
+            import sys as _sys_mwx
+            print(
+                f"[MWX-DA-DEBUG] input: {_mwx_baro_inhg:.3f} inHg → {_mwx_p_hpa:.3f} hPa = {_mwx_p_pa:.2f} Pa "
+                f"(NO elevation correction applied)",
+                file=_sys_mwx.stderr, flush=True,
+            )
+            print(
+                f"[MWX-DA-DEBUG] T={_mwx_temp_f:.2f}°F = {_mwx_t_c:.4f}°C = {_mwx_t_k:.4f} K  "
+                f"RH={_mwx_rh_pct:.1f}%",
+                file=_sys_mwx.stderr, flush=True,
+            )
+            print(
+                f"[MWX-DA-DEBUG] e_s={_mwx_e_s:.3f} Pa  e_pa={_mwx_e_pa:.3f} Pa  "
+                f"P_dry={_mwx_p_dry:.3f} Pa",
+                file=_sys_mwx.stderr, flush=True,
+            )
+            print(
+                f"[MWX-DA-DEBUG] rho={_mwx_rho:.6f} kg/m³  rho_sl=1.22500 kg/m³  "
+                f"ratio={_mwx_rho/1.225:.6f}",
+                file=_sys_mwx.stderr, flush=True,
+            )
+            _rdp_manual_da = calc_density_altitude(
+                _mwx_temp_f,
+                _mwx_rh_pct,
+                _mwx_p_hpa,  # already converted above
+            )
+            print(
+                f"[MWX-DA-DEBUG] → DA = {_rdp_manual_da:.1f} ft",
+                file=_sys_mwx.stderr, flush=True,
+            )
+        else:
+            _rdp_manual_da = None
+        _rdp_pred_da = _rdp_manual_da if _rdp_manual_active else _rdp_da
 
         _rc1, _rc2, _rc3, _rc4 = st.columns(4)
         _rc1.metric("🌡️ Temperature",  f"{_rdp_wx['temperature_f']:.1f} °F"            if _rdp_wx.get("temperature_f") is not None else "—")
@@ -2129,13 +2666,76 @@ if st.session_state.get("current_page") == "predictor":
         elif _rdp_wx.get("_source") == "open-meteo":
             st.caption("<span style='color:#666;font-size:0.75rem;'>📡 Weather data: Open-Meteo forecast (no METAR station found within 150 nm)</span>", unsafe_allow_html=True)
 
+        # ── Manual weather station expander ───────────────────────────────────
+        with st.expander("🌡️ Enter your own weather station readings", expanded=_rdp_manual_active):
+            st.caption(
+                "Use readings from a handheld weather station for maximum accuracy. "
+                "These override the auto-fetched weather for ET prediction."
+            )
+            _mwx_c1, _mwx_c2, _mwx_c3 = st.columns(3)
+            _mwx_temp = _mwx_c1.number_input(
+                "Temperature (°F)",
+                min_value=-60.0, max_value=150.0, step=0.1, format="%.1f",
+                value=float(_rdp_mwx.get("temp_f", 0.0)),
+                key="rdp_mwx_temp",
+            )
+            _mwx_baro = _mwx_c2.number_input(
+                "Station pressure (inHg)",
+                min_value=0.0, max_value=35.0, step=0.01, format="%.2f",
+                value=float(_rdp_mwx.get("baro_inhg", 0.0)),
+                help="Uncorrected / station barometric pressure — NOT sea-level corrected",
+                key="rdp_mwx_baro",
+            )
+            _mwx_rh = _mwx_c3.number_input(
+                "Relative Humidity (%)",
+                min_value=0.0, max_value=100.0, step=1.0, format="%.0f",
+                value=float(_rdp_mwx.get("rh_pct", 0.0)),
+                key="rdp_mwx_rh",
+            )
+            _mwx_apply_col, _mwx_clear_col, _ = st.columns([1, 1, 2])
+            if _mwx_apply_col.button("✅ Use these values", key="rdp_mwx_apply", type="primary"):
+                if _mwx_baro > 0 and _mwx_rh > 0:
+                    st.session_state["rdp_manual_wx"] = {
+                        "baro_inhg": _mwx_baro,
+                        "temp_f":    _mwx_temp,
+                        "rh_pct":    _mwx_rh,
+                    }
+                    st.rerun()
+            if _mwx_clear_col.button("🗑️ Clear", key="rdp_mwx_clear"):
+                st.session_state.pop("rdp_manual_wx", None)
+                for _k in ("rdp_mwx_baro", "rdp_mwx_temp", "rdp_mwx_rh"):
+                    st.session_state.pop(_k, None)
+                st.rerun()
+
+            # Live DA preview (uses values currently in the inputs)
+            if _mwx_baro > 0 and _mwx_rh > 0:
+                _preview_da = calc_density_altitude(_mwx_temp, _mwx_rh, _mwx_baro * 33.8639)
+                if _preview_da is not None:
+                    _active_badge = (
+                        "<span style='background:#1a3a1a;color:#2ecc71;font-size:0.7rem;"
+                        "padding:2px 8px;border-radius:4px;margin-left:10px;'>● ACTIVE — overrides METAR</span>"
+                        if _rdp_manual_active else ""
+                    )
+                    st.markdown(
+                        f"<div style='background:#0a1a0a;border:1px solid #2ecc71;border-radius:8px;"
+                        f"padding:14px 18px;margin-top:10px;'>"
+                        f"<div style='color:#888;font-size:0.78rem;margin-bottom:4px;'>"
+                        f"📡 DA FROM YOUR WEATHER STATION{_active_badge}</div>"
+                        f"<div style='color:#2ecc71;font-size:1.8rem;font-weight:700;'>{_preview_da:,.0f} ft</div>"
+                        f"<div style='color:#666;font-size:0.75rem;margin-top:4px;'>"
+                        f"{_mwx_temp:.1f}°F · {_mwx_rh:.0f}% RH · {_mwx_baro:.2f} inHg station</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
         st.markdown("---")
 
         # ── ET Prediction ─────────────────────────────────────────────────────
         st.markdown("## 🎯 ET Prediction")
 
-        if _rdp_da is None:
-            st.warning("Cannot compute DA — check that weather data loaded correctly.")
+        if _rdp_pred_da is None:
+            st.warning("Cannot compute DA — check that weather data loaded correctly." +
+                       (" Enter station pressure and humidity above." if not _rdp_manual_active else ""))
         else:
             _rdp_history = _rdp_load_run_history(_current_user)
 
@@ -2172,7 +2772,7 @@ if st.session_state.get("current_page") == "predictor":
                         st.error("Regression failed — all runs may have identical DA values.")
                     else:
                         _rdp_r2       = _rdp_r_squared(_rdp_xs, _rdp_ys, _rdp_slope, _rdp_intercept)
-                        _rdp_pred_et  = _rdp_slope * _rdp_da + _rdp_intercept
+                        _rdp_pred_et  = _rdp_slope * _rdp_pred_da + _rdp_intercept
                         _rdp_dial     = _rdp_pred_et + 0.02
 
                         if _rdp_n_incl < 5:
@@ -2189,9 +2789,13 @@ if st.session_state.get("current_page") == "predictor":
                             _rdp_conf_color  = "#22aa55"
 
                         _rp1, _rp2, _rp3 = st.columns(3)
-                        _rp1.metric("Predicted ET",      f"{_rdp_pred_et:.3f} s")
-                        _rp2.metric("Suggested Dial",    f"{_rdp_dial:.3f} s", help="+0.02 s buffer to help avoid breakout")
-                        _rp3.metric("Today's DA",        f"{_rdp_da:,.0f} ft")
+                        _rp1.metric("Predicted ET",   f"{_rdp_pred_et:.3f} s")
+                        _rp2.metric("Suggested Dial", f"{_rdp_dial:.3f} s", help="+0.02 s buffer to help avoid breakout")
+                        _rp3.metric(
+                            "DA Used",
+                            f"{_rdp_pred_da:,.0f} ft",
+                            help="From your weather station" if _rdp_manual_active else "From METAR / forecast",
+                        )
 
                         st.markdown(
                             f"<div style='margin-top:4px;font-size:0.9rem;'>"
@@ -2681,55 +3285,76 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
                             st.warning(f"Timeslip upload failed: {_sl_se}")
                     _new_run_rec["timeslip_storage_key"] = _sl_s_key
 
-                    if api_key:
+                    if not car_number_input.strip():
+                        _create_status.write(
+                            "ℹ️ Enter your car number in **Car Profile** to scan timeslips. "
+                            "RaceFusion needs your car number to identify your lane on the timeslip."
+                        )
+                    elif api_key:
                         _create_status.write("🎫 Scanning timeslip…")
                         try:
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
-                            _new_run_rec["timeslip"] = _scan_result
 
-                            # Auto-populate result from scanned slip (only if not manually set)
-                            _scanned_result = _normalize_slip_result(_scan_result.get("result"))
-                            if _scanned_result:
-                                _rd_auto = _new_run_rec.get("run_details") or {}
-                                if not _rd_auto.get("result"):
-                                    _rd_auto["result"] = _scanned_result
-                                    _new_run_rec["run_details"] = _rd_auto
+                            if _scan_result.get("car_found") is False:
+                                _new_run_rec["timeslip"] = _scan_result
+                                _create_status.write(
+                                    f"⚠️ Car number **{car_number_input.strip()}** was not found on "
+                                    "this timeslip. Please verify your car number in Car Profile."
+                                )
+                            else:
+                                _new_run_rec["timeslip"] = _scan_result
 
-                            # ── Fetch weather ─────────────────────────────────
-                            _slip_date = _scan_result.get("date")
-                            if _slip_date:
-                                _slip_hour = 12
-                                if _scan_result.get("time"):
-                                    try:
-                                        _slip_hour = int(str(_scan_result["time"]).split(":")[0])
-                                    except Exception:
-                                        _slip_hour = 12
-                                _wx_lat, _wx_lon, _wx_label = None, None, ""
-                                _track = (_scan_result.get("track_location")
-                                          or _scan_result.get("track_name") or "")
-                                if _track:
-                                    _create_status.write(f"📍 Geocoding {_track}…")
-                                    _wx_lat, _wx_lon, _wx_label = geocode(_track)
-                                if _wx_lat is None and cfg.get("lat"):
-                                    _wx_lat  = cfg["lat"]
-                                    _wx_lon  = cfg["lon"]
-                                    _wx_label = cfg.get("location_label", "")
-                                if _wx_lat is not None:
-                                    _create_status.write("🌤️ Fetching weather…")
-                                    try:
-                                        _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
-                                        _da = calc_density_altitude(
-                                            _wx.get("temperature_f"),
-                                            _wx.get("humidity_pct"),
-                                            _wx.get("pressure_hpa"),
-                                        )
-                                        if _da is not None:
-                                            _wx["density_alt_ft"] = round(_da)
-                                        _new_run_rec["weather"]          = _wx
-                                        _new_run_rec["weather_date"]     = _slip_date
-                                        _new_run_rec["weather_location"] = _wx_label
-                                    except Exception as _wx_e:
-                                        st.warning(f"Weather fetch failed: {_wx_e}")
+                                # Auto-populate result from scanned slip (only if not manually set)
+                                _scanned_result = _normalize_slip_result(_scan_result.get("result"))
+                                if _scanned_result:
+                                    _rd_auto = _new_run_rec.get("run_details") or {}
+                                    if not _rd_auto.get("result"):
+                                        _rd_auto["result"] = _scanned_result
+                                        _new_run_rec["run_details"] = _rd_auto
+
+                                # ── Fetch weather ─────────────────────────────────
+                                _slip_date = _scan_result.get("date")
+                                if _slip_date:
+                                    _slip_hour = 12
+                                    if _scan_result.get("time"):
+                                        try:
+                                            _slip_hour = int(str(_scan_result["time"]).split(":")[0])
+                                        except Exception:
+                                            _slip_hour = 12
+                                    _wx_lat, _wx_lon, _wx_label = None, None, ""
+                                    _tname = _scan_result.get("track_name", "")
+                                    _tloc  = _scan_result.get("track_location", "")
+                                    if _tname or _tloc:
+                                        _create_status.write(f"📍 Looking up {_tname or _tloc}…")
+                                        _tk = lookup_track(_tname, _tloc)
+                                        if _tk:
+                                            _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
+                                            # Auto-save track location to user config
+                                            cfg["location_name"]  = _tname or _tloc
+                                            cfg["location_label"] = _tk["display_name"]
+                                            cfg["lat"] = _tk["lat"]
+                                            cfg["lon"] = _tk["lon"]
+                                            save_config(cfg)
+                                    if _wx_lat is None and cfg.get("lat"):
+                                        _wx_lat  = cfg["lat"]
+                                        _wx_lon  = cfg["lon"]
+                                        _wx_label = cfg.get("location_label", "")
+                                    if _wx_lat is not None:
+                                        _create_status.write("🌤️ Fetching weather…")
+                                        try:
+                                            _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
+                                            _da = calc_density_altitude(
+                                                _wx.get("temperature_f"),
+                                                _wx.get("humidity_pct"),
+                                                _wx.get("pressure_hpa"),
+                                            )
+                                            if _da is not None:
+                                                _wx["density_alt_ft"] = round(_da)
+                                            _new_run_rec["weather"]          = _wx
+                                            _new_run_rec["weather_date"]     = _slip_date
+                                            _new_run_rec["weather_location"] = _wx_label
+                                        except Exception as _wx_e:
+                                            st.warning(f"Weather fetch failed: {_wx_e}")
                         except Exception as _scan_e:
                             st.warning(f"Timeslip scan failed: {_scan_e}")
 
@@ -2854,25 +3479,44 @@ if _slip_storage_key and _sb:
         _slip_storage_key = None
 
 # ── Scan timeslip if image available and data not yet extracted ───────────────
-if _slip_bytes is not None and "timeslip" not in run:
+# Re-scan if: no timeslip data at all, OR previous scan returned car_not_found
+# but the user has now entered a car number (so we can try again).
+_needs_scan = _slip_bytes is not None and (
+    "timeslip" not in run
+    or (car_number_input.strip() and run.get("timeslip", {}).get("car_found") is False)
+)
+if _needs_scan:
     if not api_key:
         _scan_status_area.warning("⚠️ ANTHROPIC_API_KEY not set — timeslip scanning unavailable.")
+    elif not car_number_input.strip():
+        pass  # message handled in dashboard area below
     else:
         with _scan_status_area.status("🎫 Scanning timeslip…", expanded=False) as _scan_status:
             try:
                 slip_data = scan_timeslip(_slip_bytes, _slip_media, api_key, car_number_input)
-                run["timeslip"] = slip_data
-                # Auto-populate result from scanned slip (only if not manually set)
-                _scanned_result = _normalize_slip_result(slip_data.get("result"))
-                if _scanned_result:
-                    _rd_auto = run.get("run_details") or {}
-                    if not _rd_auto.get("result"):
-                        _rd_auto["result"] = _scanned_result
-                        run["run_details"] = _rd_auto
-                run["csv_name"] = csv_name
-                save_run(csv_name, run)
-                _scan_status.update(label="✅ Timeslip scanned!", state="complete", expanded=False)
-                st.rerun()
+                if slip_data.get("car_found") is False:
+                    # Save sentinel so we don't retry every load;
+                    # re-scan triggers automatically once car number changes.
+                    run["timeslip"] = slip_data
+                    run["csv_name"] = csv_name
+                    save_run(csv_name, run)
+                    _scan_status.update(
+                        label=f"⚠️ Car #{car_number_input.strip()} not found on timeslip",
+                        state="error", expanded=False,
+                    )
+                else:
+                    run["timeslip"] = slip_data
+                    # Auto-populate result from scanned slip (only if not manually set)
+                    _scanned_result = _normalize_slip_result(slip_data.get("result"))
+                    if _scanned_result:
+                        _rd_auto = run.get("run_details") or {}
+                        if not _rd_auto.get("result"):
+                            _rd_auto["result"] = _scanned_result
+                            run["run_details"] = _rd_auto
+                    run["csv_name"] = csv_name
+                    save_run(csv_name, run)
+                    _scan_status.update(label="✅ Timeslip scanned!", state="complete", expanded=False)
+                    st.rerun()
             except Exception as e:
                 _scan_status.update(label="❌ Scan failed", state="error", expanded=True)
                 st.error(f"Timeslip scan failed: {e}")
@@ -2890,17 +3534,26 @@ if slip and "weather" not in run and slip.get("date"):
         except Exception:
             hour = 12
 
-    # Resolve lat/lon: timeslip track_location first, then manual config
+    # Resolve lat/lon: look up track by name first, then fall back to manual config
     wx_lat, wx_lon, wx_label = None, None, ""
 
-    track_loc = slip.get("track_location") or slip.get("track_name") or ""
-    if track_loc:
-        with st.sidebar.status(f"📍 Geocoding: {track_loc}…", expanded=False) as _geo_status:
-            wx_lat, wx_lon, wx_label = geocode(track_loc)
-            if wx_lat is None:
-                _geo_status.update(label=f"📍 Couldn't geocode '{track_loc}'", state="error", expanded=False)
-            else:
+    _track_name_ws = slip.get("track_name", "")
+    _track_loc_ws  = slip.get("track_location", "")
+    _track_label_ws = _track_name_ws or _track_loc_ws
+    if _track_label_ws:
+        with st.sidebar.status(f"📍 Looking up {_track_label_ws}…", expanded=False) as _geo_status:
+            _tk_ws = lookup_track(_track_name_ws, _track_loc_ws)
+            if _tk_ws:
+                wx_lat, wx_lon, wx_label = _tk_ws["lat"], _tk_ws["lon"], _tk_ws["display_name"]
                 _geo_status.update(label=f"📍 {wx_label}", state="complete", expanded=False)
+                # Auto-save track location to user config
+                cfg["location_name"]  = _track_name_ws or _track_loc_ws
+                cfg["location_label"] = _tk_ws["display_name"]
+                cfg["lat"] = _tk_ws["lat"]
+                cfg["lon"] = _tk_ws["lon"]
+                save_config(cfg)
+            else:
+                _geo_status.update(label=f"📍 Couldn't locate '{_track_label_ws}'", state="error", expanded=False)
 
     if wx_lat is None and cfg.get("lat"):
         wx_lat = cfg["lat"]
@@ -3930,6 +4583,10 @@ st.markdown("---")
 
 # ── Timeslip + Weather cards ──────────────────────────────────────────────────
 slip = run.get("timeslip")
+# Detect car-not-found sentinel (scan ran but user's car wasn't on the slip)
+_slip_car_not_found = bool(slip and slip.get("car_found") is False)
+if _slip_car_not_found:
+    slip = None   # suppress the timeslip card; handle via message below
 wx = run.get("weather")
 
 if slip or wx:
@@ -4095,6 +4752,21 @@ if slip and weight_input:
 
     st.markdown("---")
 
+elif _slip_car_not_found:
+    st.warning(
+        f"Car number **{car_number_input.strip()}** was not found on this timeslip. "
+        "Please verify your car number in **Car Profile** (sidebar), then use **Re-scan** "
+        "to try again.",
+        icon="⚠️",
+    )
+    st.markdown("---")
+elif _slip_storage_key and not car_number_input.strip():
+    st.info(
+        "Enter your car number in **Car Profile** (sidebar) to scan timeslips. "
+        "RaceFusion needs your car number to identify your lane on the timeslip.",
+        icon="ℹ️",
+    )
+    st.markdown("---")
 elif _slip_bytes is None:
     st.info("📎 Upload a timeslip photo in the sidebar to add run data and auto-fetch weather.", icon="🎫")
     st.markdown("---")
