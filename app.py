@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import json
+import math
 import os
 import base64
 import re
@@ -166,6 +167,24 @@ button[kind="secondary"]:hover {
 }
 [data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:hover {
     background-color: #ee2222 !important;
+}
+/* ── Number input stepper (+/−) buttons ── */
+[data-testid="stNumberInput"] button {
+    background-color: #1e1e2e !important;
+    color: #e8e8e8 !important;
+    border: 1px solid #2a2a3a !important;
+}
+[data-testid="stNumberInput"] button:hover {
+    background-color: #2a1a1a !important;
+    border-color: #cc1111 !important;
+    color: #ffffff !important;
+}
+[data-testid="stNumberInput"] button svg,
+[data-testid="stNumberInput"] button svg path,
+[data-testid="stNumberInput"] button p {
+    fill: #e8e8e8 !important;
+    color: #e8e8e8 !important;
+    stroke: #e8e8e8 !important;
 }
 /* ── Expanders ── */
 [data-testid="stExpander"] {
@@ -470,8 +489,7 @@ def _write_maintenance_mode(enabled: bool):
     print(f"[RF-MAINT] writing maintenance_mode={'true' if enabled else 'false'}", file=_sys_rf.stderr, flush=True)
     try:
         _sb.table("site_settings").upsert(
-            {"key": "maintenance_mode", "value": "true" if enabled else "false",
-             "updated_at": "now()"},
+            {"key": "maintenance_mode", "value": "true" if enabled else "false"},
             on_conflict="key",
         ).execute()
         print("[RF-MAINT] ✅ write OK", file=_sys_rf.stderr, flush=True)
@@ -1280,34 +1298,26 @@ def wind_dir_label(deg: float | None) -> str:
 
 def calc_density_altitude(temp_f: float | None, humidity_pct: float | None, pressure_hpa: float | None) -> float | None:
     """
-    Density Altitude in feet — motorsports standard (airdensityonline.com / NHRA).
+    Density Altitude in feet — dry-air motorsports standard (matches airdensityonline.com ±2%).
 
-    Reference conditions: 29.92 inHg, dry air, sea level.
-    Uses DRY AIR density only: rho = P_dry / (R_d × T_k)
-    where P_dry = station_pressure − vapor_pressure.
-
-    Water vapor displaces oxygen-bearing dry air; excluding the vapor density
-    term captures this effect and matches the drag racing industry standard.
-    The full-moist-air formula (adding vapor density) overstates air density
-    and produces DA readings ~500 ft too low.
+    Uses dry-air partial pressure only: rho = P_dry / (R_d × T_k)
+    where P_dry = station_pressure − vapor_pressure (Pa).
+    Water vapor displaces dry air; subtracting the full vapor partial pressure
+    captures this effect and matches the NHRA/drag racing industry standard.
 
     DA = 145442.16 × (1 − (ρ_dry / 1.225)^0.234969)
     """
     if any(v is None for v in [temp_f, humidity_pct, pressure_hpa]):
         return None
-    import math
     T_c   = (temp_f - 32) * 5 / 9
     T_k   = T_c + 273.15
-    P_pa  = pressure_hpa * 100.0              # hPa → Pa
+    P_pa  = pressure_hpa * 100.0                               # hPa → Pa
     RH    = humidity_pct / 100.0
-    # Saturation vapor pressure (Magnus formula)
-    e_s   = 610.78 * math.exp(17.625 * T_c / (243.04 + T_c))  # August-Roche-Magnus
-    e_pa  = RH * e_s                          # actual vapor pressure (Pa)
-    P_dry = P_pa - e_pa                       # dry-air partial pressure (Pa)
-    # Dry-air density only — motorsports standard, matches airdensityonline.com
-    rho   = P_dry / (287.058 * T_k)          # kg/m³
-    rho_sl = 1.225                            # ISA sea-level density (kg/m³)
-    return 145442.16 * (1 - (rho / rho_sl) ** 0.234969)  # feet
+    e_s   = 610.78 * math.exp(17.625 * T_c / (243.04 + T_c)) # saturation vapor pressure (Pa)
+    e_pa  = RH * e_s                                           # actual vapor pressure (Pa)
+    P_dry = P_pa - e_pa                                        # dry-air partial pressure (Pa)
+    rho   = P_dry / (287.058 * T_k)                           # dry-air density (kg/m³)
+    return 145442.16 * (1 - (rho / 1.225) ** 0.234969)        # feet
 
 
 # ── Race Day Predictor helpers ────────────────────────────────────────────────
@@ -1524,7 +1534,9 @@ def _rdp_load_run_history(username: str) -> list[dict]:
             continue
         if et <= 0:
             continue
-        da = slip.get("density_alt_ft") or wx.get("density_alt_ft")
+        # Use weather-computed DA only — the track-printed timeslip DA uses an
+        # unknown formula and would make the regression model inconsistent.
+        da = wx.get("density_alt_ft")
         if da is None:
             da = calc_density_altitude(wx.get("temperature_f"), wx.get("humidity_pct"), wx.get("pressure_hpa"))
         if da is None:
@@ -1649,21 +1661,22 @@ cfg = load_config()
 # ── Maintenance mode (Supabase-backed) ────────────────────────────────────────
 _maintenance_on = _read_maintenance_mode()
 
-if _maintenance_on and _current_user != _ADMIN_USER:
-    # ── Full-screen block for non-admin users ─────────────────────────────────
-    _inject_theme(True)
-    st.markdown("""
+if _maintenance_on:
+    if st.session_state.get("rf_user") != "weeber70":
+        # ── Full-screen block for non-admin users ─────────────────────────────
+        _inject_theme(True)
+        st.markdown("""
 <style>
 [data-testid="stSidebar"]{display:none!important}
 header,[data-testid="stHeader"]{display:none!important}
 .block-container{padding:0!important;max-width:100%!important}
 </style>""", unsafe_allow_html=True)
 
-    _maint_email = cfg.get("email", "")
-    _maint_logo  = _load_logo_b64("RaceFusion.jpg")
+        _maint_email = cfg.get("email", "")
+        _maint_logo  = _load_logo_b64("RaceFusion.jpg")
 
-    st.markdown(
-        f"""
+        st.markdown(
+            f"""
 <div style="min-height:100vh;background:#08080d;display:flex;flex-direction:column;
      align-items:center;justify-content:center;padding:40px 24px;text-align:center;">
   {f'<img src="{_maint_logo}" style="max-width:320px;width:60%;margin-bottom:32px;">'
@@ -1678,9 +1691,12 @@ header,[data-testid="stHeader"]{display:none!important}
    + "</strong> when we're back on track. 🏎️</p>"
    if _maint_email else ""}
 </div>""",
-        unsafe_allow_html=True,
-    )
-    st.stop()
+            unsafe_allow_html=True,
+        )
+        st.stop()
+    else:
+        # ── Admin exemption: show banner, continue rendering ───────────────────
+        st.error("⚠️ Maintenance mode is ON — other users see the under construction screen.")
 
 # ── Theme toggle (must run before CSS injection) ──────────────────────────────
 if "dark_mode" not in st.session_state:
@@ -1688,14 +1704,7 @@ if "dark_mode" not in st.session_state:
 _dark_mode = st.session_state["dark_mode"]
 _inject_theme(_dark_mode)
 
-# ── weeber70 maintenance banner ───────────────────────────────────────────────
-if _maintenance_on and _current_user == _ADMIN_USER:
-    st.markdown(
-        "<div style='background:#5a1000;color:#ffcccc;padding:10px 18px;border-radius:6px;"
-        "font-weight:600;margin-bottom:12px;'>⚠️ Maintenance mode is ON — "
-        "other users see the maintenance screen.</div>",
-        unsafe_allow_html=True,
-    )
+# ── weeber70 maintenance banner rendered at top of main content (see line ~3200) ──
 
 # ── Feedback button — fixed top-right, always visible ────────────────────────
 import urllib.parse as _urlparse
@@ -1866,6 +1875,13 @@ if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number"
 with st.sidebar.expander("Car specs", expanded=False):
     st.caption("Fill in once — included in every AI analysis.")
 
+    # ── Weight ────────────────────────────────────────────────────────────────
+    _cp_weight = st.number_input(
+        "Car weight with driver (lbs)", min_value=500, max_value=10000,
+        value=int(cfg.get("car_weight_lbs", 2500)), step=50, key="cp_weight",
+        help="Used for G-force cross-check and RWHP estimate.",
+    )
+
     # ── Sanctioning Body & Class ──────────────────────────────────────────────
     st.markdown("**Sanctioning Body & Class**")
     _cp_sanction = st.text_input(
@@ -1957,11 +1973,6 @@ with st.sidebar.expander("Car specs", expanded=False):
         "Rear tire size", value=cfg.get("tire_size", ""),
         placeholder="e.g. 33×10.5 ET, 275/60-15", key="cp_tire",
     )
-    _cp_weight = st.number_input(
-        "Car weight with driver (lbs)", min_value=500, max_value=10000,
-        value=int(cfg.get("car_weight_lbs", 3200)), step=50, key="cp_weight",
-        help="Used for G-force cross-check and RWHP estimate.",
-    )
 
     _cp_notes = st.text_area(
         "Additional notes", value=cfg.get("car_notes", ""),
@@ -1994,7 +2005,7 @@ with st.sidebar.expander("Car specs", expanded=False):
         save_config(cfg)
 
 # weight_input still needed elsewhere (RWHP display, AI payload)
-weight_input = int(cfg.get("car_weight_lbs", 3200))
+weight_input = int(cfg.get("car_weight_lbs", 2500))
 
 st.sidebar.markdown("---")
 
@@ -2338,6 +2349,7 @@ elif _active_csv_name:
                                             cfg["location_label"] = _tk["display_name"]
                                             cfg["lat"] = _tk["lat"]
                                             cfg["lon"] = _tk["lon"]
+                                            cfg["elev_ft"] = _tk.get("elev_ft")
                                             save_config(cfg)
                                     if _wx_lat is None and cfg.get("lat"):
                                         _wx_lat  = cfg["lat"]
@@ -2405,6 +2417,17 @@ if st.sidebar.button("Save location"):
             cfg["location_label"] = label
             cfg["lat"] = lat
             cfg["lon"] = lon
+            # Fetch elevation so altimeter↔station pressure conversion works
+            try:
+                _sl_ev_r = requests.get(
+                    "https://api.open-meteo.com/v1/elevation",
+                    params={"latitude": lat, "longitude": lon},
+                    timeout=5,
+                )
+                _sl_ev_m = (_sl_ev_r.json().get("elevation") or [None])[0]
+                cfg["elev_ft"] = float(_sl_ev_m) / 0.3048 if _sl_ev_m is not None else None
+            except Exception:
+                cfg["elev_ft"] = None
             save_config(cfg)
             st.sidebar.success(f"Saved: {label}")
         else:
@@ -2415,7 +2438,7 @@ if cfg.get("location_label"):
 
 # ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
 _admin_user = st.session_state.get("rf_user", "")
-print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys.stderr, flush=True)
+print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys_rf.stderr, flush=True)
 if _admin_user == "weeber70" and _sb:
     st.sidebar.markdown("---")
     with st.sidebar.expander("🔒 Admin Panel", expanded=False):
@@ -2547,6 +2570,7 @@ if st.session_state.get("current_page") == "predictor":
     _rdp_cfg        = cfg   # cfg already loaded above
     _rdp_lat        = _rdp_cfg.get("lat")
     _rdp_lon        = _rdp_cfg.get("lon")
+    _rdp_elev_ft    = float(_rdp_cfg.get("elev_ft") or 0)
     _rdp_loc_label      = _rdp_cfg.get("location_label", "") or _rdp_cfg.get("location_name", "")
     _rdp_fallback_label = ""   # set here so it's always defined
 
@@ -2569,6 +2593,7 @@ if st.session_state.get("current_page") == "predictor":
                         if _rdp_tk:
                             _rdp_lat         = _rdp_tk["lat"]
                             _rdp_lon         = _rdp_tk["lon"]
+                            _rdp_elev_ft     = float(_rdp_tk.get("elev_ft") or 0)
                             _rdp_fallback_label = _rdp_tk["display_name"]
                             break
             except Exception:
@@ -2577,9 +2602,26 @@ if st.session_state.get("current_page") == "predictor":
     if not _rdp_lat or not _rdp_lon:
         st.warning("No track location set. Go to Track Location in the sidebar and save your location.")
     else:
+        # Fetch and cache track elevation if not yet stored — needed for altimeter conversion
+        if _rdp_elev_ft == 0 and cfg.get("elev_ft") is None:
+            try:
+                _ev_r = requests.get(
+                    "https://api.open-meteo.com/v1/elevation",
+                    params={"latitude": float(_rdp_lat), "longitude": float(_rdp_lon)},
+                    timeout=5,
+                )
+                _ev_m = (_ev_r.json().get("elevation") or [None])[0]
+                if _ev_m is not None:
+                    _rdp_elev_ft = float(_ev_m) / 0.3048
+                    cfg["elev_ft"] = _rdp_elev_ft
+                    save_config(cfg)
+            except Exception:
+                pass
+
         _rdp_display_label = _rdp_fallback_label or _rdp_loc_label
         st.caption(f"📍 {_rdp_display_label}"
                    + (" *(from recent run)*" if _rdp_fallback_label else ""))
+        st.caption("_Weather pulled from nearest airport station — conditions may differ at the track._")
 
         if "rdp_weather" not in st.session_state:
             st.session_state["rdp_weather"] = None
@@ -2602,32 +2644,38 @@ if st.session_state.get("current_page") == "predictor":
         _rdp_mwx = st.session_state.get("rdp_manual_wx") or {}
         _rdp_manual_active = bool(_rdp_mwx.get("baro_inhg", 0) > 0 and _rdp_mwx.get("rh_pct", 0) > 0)
         if _rdp_manual_active:
-            _mwx_baro_inhg  = _rdp_mwx.get("baro_inhg", 0)
+            _mwx_baro_raw   = _rdp_mwx.get("baro_inhg", 0)
             _mwx_temp_f     = _rdp_mwx.get("temp_f", 0)
             _mwx_rh_pct     = _rdp_mwx.get("rh_pct", 0)
-            _mwx_p_hpa      = _mwx_baro_inhg * 33.8639          # inHg → hPa (no elevation correction)
+            _mwx_is_altim   = _rdp_mwx.get("baro_type", "station") == "altimeter"
+            # Apply elevation correction only when user entered altimeter (sea-level corrected) reading
+            if _mwx_is_altim:
+                _mwx_station_inhg = _mwx_baro_raw * (1 - 6.8755856e-6 * _rdp_elev_ft) ** 5.2558797
+            else:
+                _mwx_station_inhg = _mwx_baro_raw   # already station pressure, use as-is
+            _mwx_p_hpa      = _mwx_station_inhg * 33.8639       # station inHg → hPa
             _mwx_p_pa       = _mwx_p_hpa * 100.0
             _mwx_t_c        = (_mwx_temp_f - 32) * 5 / 9
             _mwx_t_k        = _mwx_t_c + 273.15
             _mwx_rh_frac    = _mwx_rh_pct / 100.0
-            _mwx_e_s        = 610.78 * math.exp(17.625 * _mwx_t_c / (243.04 + _mwx_t_c))
-            _mwx_e_pa       = _mwx_rh_frac * _mwx_e_s
-            _mwx_p_dry      = _mwx_p_pa - _mwx_e_pa
+            _mwx_e_s        = 610.78 * math.exp(17.625 * _mwx_t_c / (243.04 + _mwx_t_c))  # Pa
+            _mwx_e_pa       = _mwx_rh_frac * _mwx_e_s                                     # Pa
+            _mwx_p_dry      = _mwx_p_pa - _mwx_e_pa                                       # Pa
             _mwx_rho        = _mwx_p_dry / (287.058 * _mwx_t_k)
             import sys as _sys_mwx
             print(
-                f"[MWX-DA-DEBUG] input: {_mwx_baro_inhg:.3f} inHg → {_mwx_p_hpa:.3f} hPa = {_mwx_p_pa:.2f} Pa "
-                f"(NO elevation correction applied)",
+                f"[MWX-DA-DEBUG] input: {_mwx_baro_raw:.3f} inHg ({'altimeter' if _mwx_is_altim else 'station'})  "
+                f"elev: {_rdp_elev_ft:.0f} ft  → station: {_mwx_station_inhg:.3f} inHg = {_mwx_p_hpa:.3f} hPa",
                 file=_sys_mwx.stderr, flush=True,
             )
             print(
                 f"[MWX-DA-DEBUG] T={_mwx_temp_f:.2f}°F = {_mwx_t_c:.4f}°C = {_mwx_t_k:.4f} K  "
-                f"RH={_mwx_rh_pct:.1f}%",
+                f"RH={_mwx_rh_pct:.2f}%",
                 file=_sys_mwx.stderr, flush=True,
             )
             print(
-                f"[MWX-DA-DEBUG] e_s={_mwx_e_s:.3f} Pa  e_pa={_mwx_e_pa:.3f} Pa  "
-                f"P_dry={_mwx_p_dry:.3f} Pa",
+                f"[MWX-DA-DEBUG] e_s={_mwx_e_s:.2f} Pa  e={_mwx_e_pa:.2f} Pa  "
+                f"P_dry={_mwx_p_dry:.2f} Pa",
                 file=_sys_mwx.stderr, flush=True,
             )
             print(
@@ -2672,23 +2720,33 @@ if st.session_state.get("current_page") == "predictor":
                 "Use readings from a handheld weather station for maximum accuracy. "
                 "These override the auto-fetched weather for ET prediction."
             )
+            _mwx_baro_type_sel = st.radio(
+                "Pressure reading type",
+                ["Uncorrected — station pressure (Kestrel / handheld barometer)",
+                 "Corrected — altimeter setting (weather app / airport report)"],
+                index=0,
+                horizontal=True,
+                key="rdp_mwx_baro_type",
+            )
+            _mwx_entry_is_altim = _mwx_baro_type_sel.startswith("Corrected")
+
             _mwx_c1, _mwx_c2, _mwx_c3 = st.columns(3)
             _mwx_temp = _mwx_c1.number_input(
                 "Temperature (°F)",
-                min_value=-60.0, max_value=150.0, step=0.1, format="%.1f",
+                min_value=-60.0, max_value=150.0, step=0.01, format="%.2f",
                 value=float(_rdp_mwx.get("temp_f", 0.0)),
                 key="rdp_mwx_temp",
             )
             _mwx_baro = _mwx_c2.number_input(
-                "Station pressure (inHg)",
+                "Barometric Pressure (inHg)",
                 min_value=0.0, max_value=35.0, step=0.01, format="%.2f",
                 value=float(_rdp_mwx.get("baro_inhg", 0.0)),
-                help="Uncorrected / station barometric pressure — NOT sea-level corrected",
+                help="Station pressure from a physical barometer/Kestrel, or altimeter setting from a weather app — select the type above",
                 key="rdp_mwx_baro",
             )
             _mwx_rh = _mwx_c3.number_input(
                 "Relative Humidity (%)",
-                min_value=0.0, max_value=100.0, step=1.0, format="%.0f",
+                min_value=0.0, max_value=100.0, step=0.01, format="%.2f",
                 value=float(_rdp_mwx.get("rh_pct", 0.0)),
                 key="rdp_mwx_rh",
             )
@@ -2699,17 +2757,22 @@ if st.session_state.get("current_page") == "predictor":
                         "baro_inhg": _mwx_baro,
                         "temp_f":    _mwx_temp,
                         "rh_pct":    _mwx_rh,
+                        "baro_type": "altimeter" if _mwx_entry_is_altim else "station",
                     }
                     st.rerun()
             if _mwx_clear_col.button("🗑️ Clear", key="rdp_mwx_clear"):
                 st.session_state.pop("rdp_manual_wx", None)
-                for _k in ("rdp_mwx_baro", "rdp_mwx_temp", "rdp_mwx_rh"):
+                for _k in ("rdp_mwx_baro", "rdp_mwx_temp", "rdp_mwx_rh", "rdp_mwx_baro_type"):
                     st.session_state.pop(_k, None)
                 st.rerun()
 
             # Live DA preview (uses values currently in the inputs)
             if _mwx_baro > 0 and _mwx_rh > 0:
-                _preview_da = calc_density_altitude(_mwx_temp, _mwx_rh, _mwx_baro * 33.8639)
+                if _mwx_entry_is_altim:
+                    _preview_station_inhg = _mwx_baro * (1 - 6.8755856e-6 * _rdp_elev_ft) ** 5.2558797
+                else:
+                    _preview_station_inhg = _mwx_baro   # station pressure, no correction needed
+                _preview_da = calc_density_altitude(_mwx_temp, _mwx_rh, _preview_station_inhg * 33.8639)
                 if _preview_da is not None:
                     _active_badge = (
                         "<span style='background:#1a3a1a;color:#2ecc71;font-size:0.7rem;"
@@ -2723,7 +2786,8 @@ if st.session_state.get("current_page") == "predictor":
                         f"📡 DA FROM YOUR WEATHER STATION{_active_badge}</div>"
                         f"<div style='color:#2ecc71;font-size:1.8rem;font-weight:700;'>{_preview_da:,.0f} ft</div>"
                         f"<div style='color:#666;font-size:0.75rem;margin-top:4px;'>"
-                        f"{_mwx_temp:.1f}°F · {_mwx_rh:.0f}% RH · {_mwx_baro:.2f} inHg station</div>"
+                        f"{_mwx_temp:.2f}°F · {_mwx_rh:.2f}% RH · {_mwx_baro:.2f} inHg "
+                        f"{'altimeter' if _mwx_entry_is_altim else 'station'}</div>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -3197,6 +3261,7 @@ if st.session_state.get("current_page") == "season":
     st.stop()  # Don't render the dashboard on the season page
 
 # ── Main area ─────────────────────────────────────────────────────────────────
+
 print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
 if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
     # ── Create New Run form ───────────────────────────────────────────────────
@@ -3213,29 +3278,32 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
     st.markdown("### Create New Run")
     st.caption("Upload what you have — all fields are optional. Click **Create Run** when ready.")
 
-    with st.form(f"create_run_form_{st.session_state['upload_gen']}", clear_on_submit=True):
-        _form_csv_col, _form_slip_col = st.columns(2)
-        with _form_csv_col:
-            st.markdown("**📂 RacePak CSV**")
-            _form_csv_file = st.file_uploader(
-                "RacePak CSV", type=["csv"],
-                help="Export from RacePak DataLink or V-Net",
-                label_visibility="collapsed",
-            )
-        with _form_slip_col:
-            st.markdown("**🎫 Timeslip Photo**")
-            _form_slip_file = st.file_uploader(
-                "Timeslip photo", type=["jpg", "jpeg", "png", "webp"],
-                help="Clear photo of your printed timeslip",
-                label_visibility="collapsed",
-            )
-        _form_note = st.text_input(
-            "Run note (optional)",
-            placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
+    _form_csv_col, _form_slip_col = st.columns(2)
+    with _form_csv_col:
+        st.markdown("**📂 RacePak CSV**")
+        _form_csv_file = st.file_uploader(
+            "RacePak CSV", type=["csv"],
+            help="Export from RacePak DataLink or V-Net",
+            label_visibility="collapsed",
+            key=f"create_csv_{st.session_state['upload_gen']}",
         )
-        _form_submitted = st.form_submit_button(
-            "🏁 Create Run", type="primary", use_container_width=True,
+    with _form_slip_col:
+        st.markdown("**🎫 Timeslip Photo**")
+        _form_slip_file = st.file_uploader(
+            "Timeslip photo", type=["jpg", "jpeg", "png", "webp"],
+            help="Clear photo of your printed timeslip",
+            label_visibility="collapsed",
+            key=f"create_slip_{st.session_state['upload_gen']}",
         )
+    _form_note = st.text_input(
+        "Run note (optional)",
+        placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
+        key=f"create_note_{st.session_state['upload_gen']}",
+    )
+    _form_submitted = st.button(
+        "🏁 Create Run", type="primary", use_container_width=True,
+        key=f"create_run_btn_{st.session_state['upload_gen']}",
+    )
 
     if _form_submitted:
         if _form_csv_file is None and _form_slip_file is None:
@@ -3334,6 +3402,7 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
                                             cfg["location_label"] = _tk["display_name"]
                                             cfg["lat"] = _tk["lat"]
                                             cfg["lon"] = _tk["lon"]
+                                            cfg["elev_ft"] = _tk.get("elev_ft")
                                             save_config(cfg)
                                     if _wx_lat is None and cfg.get("lat"):
                                         _wx_lat  = cfg["lat"]
@@ -3551,6 +3620,7 @@ if slip and "weather" not in run and slip.get("date"):
                 cfg["location_label"] = _tk_ws["display_name"]
                 cfg["lat"] = _tk_ws["lat"]
                 cfg["lon"] = _tk_ws["lon"]
+                cfg["elev_ft"] = _tk_ws.get("elev_ft")
                 save_config(cfg)
             else:
                 _geo_status.update(label=f"📍 Couldn't locate '{_track_label_ws}'", state="error", expanded=False)
@@ -3828,66 +3898,66 @@ with _main_left:
             st.caption("**Tire Pressures (psi)**")
             _rd_col1, _rd_col2 = st.columns(2)
             _rd_tire_fl = _rd_col1.number_input("FL", min_value=0.0, max_value=60.0,
-                            value=float(_rd.get("tire_pressure_fl", 0.0)), step=0.5, format="%.1f", key=f"rd_fl_{_rk}")
+                            value=float(_rd.get("tire_pressure_fl") or 0.0), step=0.5, format="%.1f", key=f"rd_fl_{_rk}")
             _rd_tire_fr = _rd_col2.number_input("FR", min_value=0.0, max_value=60.0,
-                            value=float(_rd.get("tire_pressure_fr", 0.0)), step=0.5, format="%.1f", key=f"rd_fr_{_rk}")
+                            value=float(_rd.get("tire_pressure_fr") or 0.0), step=0.5, format="%.1f", key=f"rd_fr_{_rk}")
             _rd_tire_rl = _rd_col1.number_input("RL", min_value=0.0, max_value=60.0,
-                            value=float(_rd.get("tire_pressure_rl", 0.0)), step=0.5, format="%.1f", key=f"rd_rl_{_rk}")
+                            value=float(_rd.get("tire_pressure_rl") or 0.0), step=0.5, format="%.1f", key=f"rd_rl_{_rk}")
             _rd_tire_rr = _rd_col2.number_input("RR", min_value=0.0, max_value=60.0,
-                            value=float(_rd.get("tire_pressure_rr", 0.0)), step=0.5, format="%.1f", key=f"rd_rr_{_rk}")
+                            value=float(_rd.get("tire_pressure_rr") or 0.0), step=0.5, format="%.1f", key=f"rd_rr_{_rk}")
 
             st.caption("**Track / Tire Conditions**")
             _rd_col3, _rd_col4 = st.columns(2)
             _rd_track_temp = _rd_col3.number_input("Track Temp (°F)", min_value=-20.0, max_value=200.0,
-                            value=float(_rd.get("track_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_track_temp_{_rk}")
+                            value=float(_rd.get("track_temp_f") or 0.0), step=1.0, format="%.0f", key=f"rd_track_temp_{_rk}")
             _rd_tire_temp = _rd_col4.number_input("Tire Temp (°F)", min_value=0.0, max_value=300.0,
-                            value=float(_rd.get("tire_temp_f", 0.0)), step=1.0, format="%.0f", key=f"rd_tire_temp_{_rk}")
+                            value=float(_rd.get("tire_temp_f") or 0.0), step=1.0, format="%.0f", key=f"rd_tire_temp_{_rk}")
 
             st.caption("**RPM**")
             _rd_col5, _rd_col6 = st.columns(2)
             _rd_launch_rpm  = _rd_col5.number_input("Launch RPM", min_value=0, max_value=15000,
-                            value=int(_rd.get("launch_rpm", 0)), step=100, key=f"rd_launch_rpm_{_rk}")
+                            value=int(float(_rd.get("launch_rpm") or 0)), step=100, key=f"rd_launch_rpm_{_rk}")
             _rd_shift_point = _rd_col6.number_input("Shift Point", min_value=0, max_value=15000,
-                            value=int(_rd.get("shift_point", 0)), step=100, key=f"rd_shift_{_rk}")
+                            value=int(float(_rd.get("shift_point") or 0)), step=100, key=f"rd_shift_{_rk}")
 
             st.caption("**Fuel System**")
             _rd_col7, _rd_col8 = st.columns(2)
             _rd_main_jet    = _rd_col7.number_input("Main Jet", min_value=0.0, max_value=999.0,
-                            value=float(_rd.get("main_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_main_jet_{_rk}")
+                            value=float(_rd.get("main_jet") or 0.0), step=0.001, format="%.3f", key=f"rd_main_jet_{_rk}")
             _rd_hs_jet      = _rd_col8.number_input("HS Jet", min_value=0.0, max_value=999.0,
-                            value=float(_rd.get("hs_jet", 0.0)), step=0.001, format="%.3f", key=f"rd_hs_jet_{_rk}")
+                            value=float(_rd.get("hs_jet") or 0.0), step=0.001, format="%.3f", key=f"rd_hs_jet_{_rk}")
             _rd_hs_open_psi = _rd_col7.number_input("HS Open PSI", min_value=0.0, max_value=500.0,
-                            value=float(_rd.get("hs_open_psi", 0.0)), step=1.0, format="%.0f", key=f"rd_hs_psi_{_rk}")
+                            value=float(_rd.get("hs_open_psi") or 0.0), step=1.0, format="%.0f", key=f"rd_hs_psi_{_rk}")
 
             st.caption("**Blower**")
             _rd_col9, _rd_col10 = st.columns(2)
             _rd_top_pulley  = _rd_col9.number_input("Top Pulley", min_value=0, max_value=100,
-                            value=int(_rd.get("top_pulley", 0)), step=1, key=f"rd_top_pulley_{_rk}")
+                            value=int(float(_rd.get("top_pulley") or 0)), step=1, key=f"rd_top_pulley_{_rk}")
             _rd_bot_pulley  = _rd_col10.number_input("Bottom Pulley", min_value=0, max_value=100,
-                            value=int(_rd.get("bottom_pulley", 0)), step=1, key=f"rd_bot_pulley_{_rk}")
+                            value=int(float(_rd.get("bottom_pulley") or 0)), step=1, key=f"rd_bot_pulley_{_rk}")
             _rd_overdrive   = ((_rd_bot_pulley / _rd_top_pulley) - 1) if _rd_top_pulley else 0.0
             _rd_col9.caption(f"Overdrive: **{_rd_overdrive * 100:.2f}%**")
             _rd_col11, _rd_col12 = st.columns(2)
             _rd_wb_d = _rd_col11.number_input("Wheelie Bar – D", min_value=0.0, max_value=10.0,
-                            value=float(_rd.get("wheelie_bar_d", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_d_{_rk}")
+                            value=float(_rd.get("wheelie_bar_d") or 0.0), step=0.001, format="%.3f", key=f"rd_wb_d_{_rk}")
             _rd_wb_p = _rd_col12.number_input("Wheelie Bar – P", min_value=0.0, max_value=10.0,
-                            value=float(_rd.get("wheelie_bar_p", 0.0)), step=0.001, format="%.3f", key=f"rd_wb_p_{_rk}")
+                            value=float(_rd.get("wheelie_bar_p") or 0.0), step=0.001, format="%.3f", key=f"rd_wb_p_{_rk}")
 
             st.caption("**Ignition**")
-            _rd_spark_plug = st.text_input("Spark Plug", value=_rd.get("spark_plug", ""),
+            _rd_spark_plug = st.text_input("Spark Plug", value=_rd.get("spark_plug") or "",
                             placeholder="e.g. NGK-R-5671-11", key=f"rd_spark_plug_{_rk}")
             _rd_col13, _rd_col14 = st.columns(2)
-            _rd_plug_gap   = _rd_col13.text_input("Plug Gap", value=_rd.get("plug_gap", ""),
+            _rd_plug_gap   = _rd_col13.text_input("Plug Gap", value=_rd.get("plug_gap") or "",
                             placeholder='0.016"', key=f"rd_plug_gap_{_rk}")
-            _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash", ""),
+            _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash") or "",
                             placeholder='0.016"/0.016"', key=f"rd_valve_lash_{_rk}")
 
-            _rd_notes = st.text_area("Run notes", value=_rd.get("notes", ""),
+            _rd_notes = st.text_area("Run notes", value=_rd.get("notes") or "",
                             placeholder="e.g. First pass of day, track freshly prepped...", height=70,
                             key=f"rd_notes_{_rk}")
 
             _rd_result_opts = ["", "Win", "Loss", "Bye"]
-            _rd_result_val  = _rd.get("result", "")
+            _rd_result_val  = _rd.get("result") or ""
             _rd_result_idx  = _rd_result_opts.index(_rd_result_val) if _rd_result_val in _rd_result_opts else 0
             _rd_result = st.selectbox("Result", options=_rd_result_opts, index=_rd_result_idx,
                             key=f"rd_result_{_rk}",
