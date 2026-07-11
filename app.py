@@ -1868,15 +1868,7 @@ st.sidebar.markdown("---")
 
 # ── Car Profile (static specs, saved to config) ───────────────────────────────
 st.sidebar.markdown("### 🏎️ Car Profile")
-car_number_input = st.sidebar.text_input(
-    "Your car number",
-    value=cfg.get("car_number", ""),
-    placeholder="e.g. 1234",
-    help="If the slip shows multiple cars, Claude will extract only yours",
-)
-if car_number_input.strip() and car_number_input.strip() != cfg.get("car_number", ""):
-    cfg["car_number"] = car_number_input.strip()
-    save_config(cfg)
+car_number_input = cfg.get("car_number", "")
 
 with st.sidebar.expander("Car specs", expanded=False):
     st.caption("Fill in once — included in every AI analysis.")
@@ -3230,17 +3222,27 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
             label_visibility="collapsed",
             key=f"create_slip_{st.session_state['upload_gen']}",
         )
-    _form_note = st.text_input(
-        "Run note (optional)",
-        placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
-        key=f"create_note_{st.session_state['upload_gen']}",
+    _form_car_number = st.text_input(
+        "Car number",
+        value=cfg.get("car_number", ""),
+        placeholder="e.g. 1234",
+        help="If the slip shows multiple cars, Claude will extract only yours",
+        key=f"create_car_num_{st.session_state['upload_gen']}",
     )
+    if _form_car_number.strip() and _form_car_number.strip() != cfg.get("car_number", ""):
+        cfg["car_number"] = _form_car_number.strip()
+        save_config(cfg)
     _form_run_type = st.selectbox(
         "Run type",
         ["Full Pass", "Half-Track Pass", "Tire Shake / Aborted Run", "Tune-Up Pass", "Other"],
         index=0,
         help="Non-Full Pass runs are excluded from ET predictions by default (you can override in the Run History table).",
         key=f"create_run_type_{st.session_state['upload_gen']}",
+    )
+    _form_note = st.text_input(
+        "Run note (optional)",
+        placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
+        key=f"create_note_{st.session_state['upload_gen']}",
     )
     _form_submitted = st.button(
         "🏁 Create Run", type="primary", use_container_width=True,
@@ -3295,21 +3297,21 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
                             st.warning(f"Timeslip upload failed: {_sl_se}")
                     _new_run_rec["timeslip_storage_key"] = _sl_s_key
 
-                    if not car_number_input.strip():
+                    if not _form_car_number.strip():
                         _create_status.write(
-                            "ℹ️ Enter your car number in **Car Profile** to scan timeslips. "
+                            "ℹ️ Enter your car number above to scan timeslips. "
                             "RaceFusion needs your car number to identify your lane on the timeslip."
                         )
                     elif api_key:
                         _create_status.write("🎫 Scanning timeslip…")
                         try:
-                            _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
+                            _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, _form_car_number)
 
                             if _scan_result.get("car_found") is False:
                                 _new_run_rec["timeslip"] = _scan_result
                                 _create_status.write(
-                                    f"⚠️ Car number **{car_number_input.strip()}** was not found on "
-                                    "this timeslip. Please verify your car number in Car Profile."
+                                    f"⚠️ Car number **{_form_car_number.strip()}** was not found on "
+                                    "this timeslip. Please verify your car number."
                                 )
                             else:
                                 _new_run_rec["timeslip"] = _scan_result
@@ -4996,14 +4998,13 @@ if slip and weight_input:
 elif _slip_car_not_found:
     st.warning(
         f"Car number **{car_number_input.strip()}** was not found on this timeslip. "
-        "Please verify your car number in **Car Profile** (sidebar), then use **Re-scan** "
-        "to try again.",
+        "Please verify your car number, then use **Re-scan** to try again.",
         icon="⚠️",
     )
     st.markdown("---")
 elif _slip_storage_key and not car_number_input.strip():
     st.info(
-        "Enter your car number in **Car Profile** (sidebar) to scan timeslips. "
+        "Enter your car number in the **Create New Run** form to scan timeslips. "
         "RaceFusion needs your car number to identify your lane on the timeslip.",
         icon="ℹ️",
     )
