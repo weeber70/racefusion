@@ -725,6 +725,9 @@ CHANNEL_GROUPS = {
 }
 ALL_GROUPED = [ch for chs in CHANNEL_GROUPS.values() for ch in chs]
 
+# Channel names that carry actual RPM values — used for global RacePak scale
+RPM_CHANNEL_NAMES = {"Engine RPM", "DS RPM", "MSD Engine RPM", "MSD RevLim RPM"}
+
 # Distinct colors for overlaid traces (up to 12)
 TRACE_COLORS = [
     "#EF553B",  # red
@@ -1520,7 +1523,7 @@ def _rdp_load_run_history(username: str) -> list[dict]:
     if not _sb:
         return []
     try:
-        rows = _sb.table("runs").select("run_data,created_at").eq("username", username).execute().data
+        rows = _sb.table("runs").select("id,csv_filename,run_data,created_at").eq("username", username).execute().data
     except Exception:
         return []
     results = []
@@ -1542,10 +1545,13 @@ def _rdp_load_run_history(username: str) -> list[dict]:
         if da is None:
             continue
         results.append({
-            "date":  slip.get("date") or row.get("created_at", "")[:10],
-            "track": slip.get("track_name") or slip.get("track_location") or "—",
-            "et":    et,
-            "da":    float(da),
+            "run_id":            str(row.get("id", "")),
+            "csv_filename":      row.get("csv_filename", ""),
+            "date":              slip.get("date") or row.get("created_at", "")[:10],
+            "track":             slip.get("track_name") or slip.get("track_location") or "—",
+            "et":                 et,
+            "da":                 float(da),
+            "predictor_exclude":  rec.get("predictor_exclude"),  # None / True / False
         })
     return results
 
@@ -2177,6 +2183,11 @@ with st.sidebar.expander("🗑️ Delete ALL runs",
 
 st.sidebar.markdown("---")
 
+# Reserve sidebar slot here — RacePak Controls will be rendered into this
+# container later (after CSV data is loaded), so it appears between Run Manager
+# and RacePak Data without needing the data to be available at this point.
+_racepak_controls_slot = st.sidebar.container()
+
 # ── RacePak Data ──────────────────────────────────────────────────────────────
 _rp_hdr_col, _rp_help_col = st.sidebar.columns([5, 1])
 _rp_hdr_col.markdown("### 📂 RacePak Data")
@@ -2435,124 +2446,6 @@ if st.sidebar.button("Save location"):
 
 if cfg.get("location_label"):
     st.sidebar.caption(f"📍 {cfg['location_label']}")
-
-# ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
-_admin_user = st.session_state.get("rf_user", "")
-print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys_rf.stderr, flush=True)
-if _admin_user == "weeber70" and _sb:
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("🔒 Admin Panel", expanded=False):
-
-        def _time_ago(ts_str: str) -> str:
-            if not ts_str:
-                return "never"
-            try:
-                from datetime import datetime, timezone
-                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
-                if _s < 60:    return f"{_s}s ago"
-                if _s < 3600:  return f"{_s // 60}m ago"
-                if _s < 86400: return f"{_s // 3600}h ago"
-                return f"{_s // 86400}d ago"
-            except Exception:
-                return ts_str
-
-        # ── Maintenance mode toggle ───────────────────────────────────────────
-        _maint_toggle = st.toggle(
-            "🚧 Maintenance Mode",
-            value=_maintenance_on,
-            key="admin_maint_toggle",
-            help="When ON, all users except weeber70 see the maintenance screen.",
-        )
-        if _maint_toggle != _maintenance_on:
-            _write_maintenance_mode(_maint_toggle)
-            st.rerun()
-
-        st.markdown("---")
-
-        try:
-            from datetime import datetime, timezone, timedelta
-
-            _ten_ago      = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
-            _active_count = len(_active_rows)
-
-            _cred_res    = _sb.table("credentials").select("username", count="exact").execute()
-            _total_users = _cred_res.count or len(_cred_res.data)
-
-            _runs_res    = _sb.table("runs").select("username", count="exact").execute()
-            _total_runs  = _runs_res.count or len(_runs_res.data)
-
-            try:
-                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
-                _total_slip = _slip_res.count or 0
-            except Exception:
-                _total_slip = "—"
-
-            _a1, _a2 = st.columns(2)
-            _a1.metric("Active now",        _active_count)
-            _a2.metric("Accounts",          _total_users)
-            _b1, _b2 = st.columns(2)
-            _b1.metric("Runs logged",       _total_runs)
-            _b2.metric("Timeslips scanned", _total_slip)
-
-            st.markdown("---")
-
-            _all_creds    = _sb.table("credentials").select("username").execute().data
-            _all_sessions = {r["username"]: r["last_seen"]
-                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
-            _run_rows     = _runs_res.data or _sb.table("runs").select("username").execute().data
-            _run_counts   = {}
-            for _rr in _run_rows:
-                _u = _rr.get("username", "")
-                _run_counts[_u] = _run_counts.get(_u, 0) + 1
-
-            # Fetch emails from user_configs
-            _all_emails: dict[str, str] = {}
-            try:
-                _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
-                for _cr in _cfg_rows:
-                    _cfg_blob = _cr.get("config") or {}
-                    if isinstance(_cfg_blob, str):
-                        try: _cfg_blob = json.loads(_cfg_blob)
-                        except Exception: _cfg_blob = {}
-                    _em = _cfg_blob.get("email", "")
-                    if _em:
-                        _all_emails[_cr["username"]] = _em
-            except Exception:
-                pass
-
-            _rows_html = ""
-            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
-                _un  = _cu["username"]
-                _ls  = _time_ago(_all_sessions.get(_un, ""))
-                _rc  = _run_counts.get(_un, 0)
-                _em  = _all_emails.get(_un, "—")
-                _bold = "font-weight:700;" if _un == "weeber70" else ""
-                _rows_html += (
-                    f'<tr>'
-                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
-                    f'<td style="color:#777;padding:3px 6px;font-size:0.78rem;">{_em}</td>'
-                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
-                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
-                    f'</tr>'
-                )
-
-            st.markdown(f"""
-<div style="font-size:0.82rem;font-family:monospace;overflow-x:auto;">
-<table style="width:100%;border-collapse:collapse;">
-<thead><tr>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Email</th>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
-  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
-</tr></thead>
-<tbody>{_rows_html}</tbody>
-</table>
-</div>""", unsafe_allow_html=True)
-
-        except Exception as _admin_err:
-            st.warning(f"Admin data unavailable: {_admin_err}")
 
 # ── Race Day Predictor page ───────────────────────────────────────────────────
 if st.session_state.get("current_page") == "predictor":
@@ -2819,8 +2712,13 @@ if st.session_state.get("current_page") == "predictor":
                 _rdp_included = []
                 _rdp_excluded = []
                 for _rdp_r in _rdp_history:
-                    if _rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi:
-                        _rdp_excluded.append({**_rdp_r, "status": "excluded — outlier (IQR method)"})
+                    _rdp_uov = _rdp_r.get("predictor_exclude")   # None / True / False
+                    if _rdp_uov is True:
+                        _rdp_excluded.append({**_rdp_r, "status": "excluded — manual override"})
+                    elif _rdp_uov is False:
+                        _rdp_included.append({**_rdp_r, "status": "included (manual override)"})
+                    elif _rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi:
+                        _rdp_excluded.append({**_rdp_r, "status": "excluded — outlier (IQR)"})
                     else:
                         _rdp_included.append({**_rdp_r, "status": "included"})
 
@@ -2871,8 +2769,9 @@ if st.session_state.get("current_page") == "predictor":
                         if _rdp_excluded:
                             st.markdown(
                                 f"<p style='color:#888;font-size:0.82rem;margin-top:12px;'>"
-                                f"⚠️ {len(_rdp_excluded)} run(s) excluded as outliers "
-                                f"(IQR fences: {_rdp_lo:.3f}s – {_rdp_hi:.3f}s).</p>",
+                                f"⚠️ {len(_rdp_excluded)} run(s) excluded "
+                                f"(IQR fences: {_rdp_lo:.3f}–{_rdp_hi:.3f}s)"
+                                f" — see table below to override.</p>",
                                 unsafe_allow_html=True,
                             )
 
@@ -2880,49 +2779,85 @@ if st.session_state.get("current_page") == "predictor":
 
                 # ── Run History Table ─────────────────────────────────────────
                 st.markdown("## 📋 Run History Used in Prediction")
+                st.caption(
+                    "Check **Include** to force-include a run; uncheck to force-exclude. "
+                    "Non-Full Pass runs and IQR outliers are excluded automatically."
+                )
                 _rdp_display = []
                 for _rdp_r in _rdp_included:
-                    _rdp_display.append({**_rdp_r, "status": "✅ Included"})
+                    _rdp_display.append({**_rdp_r, "status": "included"})
                 for _rdp_r in _rdp_excluded:
                     _rdp_display.append(_rdp_r)
                 _rdp_display.sort(key=lambda x: x["date"], reverse=True)
 
-                _rdp_rows_html = ""
-                for _rdp_row in _rdp_display:
-                    _is_ex   = _rdp_row["status"].startswith("excluded")
-                    _rc      = "#555" if _is_ex else "#ddd"
-                    _sc      = "#888" if _is_ex else "#4caf50"
-                    _op      = "0.55" if _is_ex else "1"
-                    _st_lbl  = f"❌ {_rdp_row['status']}" if _is_ex else "✅ Included"
-                    _rdp_rows_html += (
-                        f"<tr style='opacity:{_op};'>"
-                        f"<td style='padding:5px 10px 5px 0;color:{_rc};'>{_rdp_row['date']}</td>"
-                        f"<td style='padding:5px 10px;color:{_rc};'>{_rdp_row['track']}</td>"
-                        f"<td style='padding:5px 10px;color:{_rc};text-align:right;'>{_rdp_row['et']:.3f}</td>"
-                        f"<td style='padding:5px 10px;color:{_rc};text-align:right;'>{_rdp_row['da']:,.0f}</td>"
-                        f"<td style='padding:5px 0;color:{_sc};font-size:0.85rem;'>{_st_lbl}</td>"
-                        f"</tr>"
+                _rdp_col_w = [1, 2, 3, 2, 2, 3]
+
+                # Header row
+                _rdp_hdr = st.columns(_rdp_col_w)
+                for _hcol, _hlbl in zip(
+                    _rdp_hdr,
+                    ["Include", "Date", "Track", "ET", "DA ft", "Status"],
+                ):
+                    _hcol.markdown(
+                        f"<span style='font-size:0.75em;color:#888;"
+                        f"text-transform:uppercase;letter-spacing:0.05em'>{_hlbl}</span>",
+                        unsafe_allow_html=True,
                     )
-                st.markdown(f"""
-<div style="border:1px solid #1e1e2a;border-radius:10px;padding:16px 20px;background:#0a0a14;overflow-x:auto;">
-<table style="width:100%;border-collapse:collapse;font-size:0.9rem;font-family:monospace;">
-<thead><tr style="border-bottom:1px solid #2a2a3a;">
-  <th style="color:#666;text-align:left;padding:4px 10px 8px 0;">Date</th>
-  <th style="color:#666;text-align:left;padding:4px 10px 8px;">Track</th>
-  <th style="color:#666;text-align:right;padding:4px 10px 8px;">ET (s)</th>
-  <th style="color:#666;text-align:right;padding:4px 10px 8px;">DA (ft)</th>
-  <th style="color:#666;text-align:left;padding:4px 0 8px;">Status</th>
-</tr></thead>
-<tbody>{_rdp_rows_html}</tbody>
-</table>
-</div>""", unsafe_allow_html=True)
                 st.markdown(
-                    f"<p style='color:#555;font-size:0.8rem;margin-top:8px;'>"
-                    f"{_rdp_n_incl} runs included · {len(_rdp_excluded)} excluded · "
-                    f"Q1 {_rdp_q1:.3f}s · Q3 {_rdp_q3:.3f}s · "
-                    f"fences {_rdp_lo:.3f}–{_rdp_hi:.3f}s</p>",
+                    "<hr style='margin:2px 0 6px 0;border-color:#333'>",
                     unsafe_allow_html=True,
                 )
+
+                _rdp_changes = {}   # {run_id: new_include_bool} for any toggled rows
+                for _rdp_row in _rdp_display:
+                    _run_id = _rdp_row.get("run_id", "")
+                    _is_inc = not _rdp_row["status"].startswith("excluded")
+                    _status = _rdp_row["status"]
+
+                    if _status == "included":
+                        _status_html = "<span style='color:#4CAF50'>included</span>"
+                    elif "manual override" in _status:
+                        _status_html = "<span style='color:#888'>excluded — manual override</span>"
+                    else:
+                        _status_html = "<span style='color:#FFA500'>excluded — outlier (IQR)</span>"
+
+                    _rdp_cols = st.columns(_rdp_col_w)
+                    _new_inc = _rdp_cols[0].checkbox(
+                        "", value=_is_inc,
+                        key=f"run_include_{_run_id}",
+                        label_visibility="collapsed",
+                    )
+                    _rdp_cols[1].write(_rdp_row["date"] or "—")
+                    _rdp_cols[2].write(_rdp_row.get("track") or "—")
+                    _rdp_cols[3].write(f"{_rdp_row['et']:.3f}")
+                    _rdp_cols[4].write(f"{int(round(_rdp_row['da'])):,}")
+                    _rdp_cols[5].markdown(_status_html, unsafe_allow_html=True)
+                    st.markdown(
+                        "<hr style='margin:2px 0;border-color:#222'>",
+                        unsafe_allow_html=True,
+                    )
+
+                    if _new_inc != _is_inc:
+                        _rdp_changes[_run_id] = _new_inc
+
+                st.caption(
+                    f"{_rdp_n_incl} included · {len(_rdp_excluded)} excluded · "
+                    f"IQR fences {_rdp_lo:.3f}–{_rdp_hi:.3f}s · "
+                    f"Q1 {_rdp_q1:.3f}s · Q3 {_rdp_q3:.3f}s"
+                )
+
+                # Persist overrides to Supabase when a checkbox is toggled
+                if _sb and _rdp_changes:
+                    for _crid, _cinc in _rdp_changes.items():
+                        try:
+                            _crow = _sb.table("runs").select("run_data").eq("id", _crid).execute().data
+                            if _crow:
+                                _crd = (_crow[0].get("run_data") or {})
+                                _crd["predictor_exclude"] = not _cinc
+                                _sb.table("runs").update({"run_data": _crd}).eq("id", _crid).execute()
+                        except Exception as _ce:
+                            st.error(f"Failed to save run override: {_ce}")
+                    st.rerun()
 
     st.stop()  # Don't render the dashboard when on predictor page
 
@@ -3300,6 +3235,13 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
         placeholder="e.g. 1st qualifying pass, 80 °F, sticky track",
         key=f"create_note_{st.session_state['upload_gen']}",
     )
+    _form_run_type = st.selectbox(
+        "Run type",
+        ["Full Pass", "Half-Track Pass", "Tire Shake / Aborted Run", "Tune-Up Pass", "Other"],
+        index=0,
+        help="Non-Full Pass runs are excluded from ET predictions by default (you can override in the Run History table).",
+        key=f"create_run_type_{st.session_state['upload_gen']}",
+    )
     _form_submitted = st.button(
         "🏁 Create Run", type="primary", use_container_width=True,
         key=f"create_run_btn_{st.session_state['upload_gen']}",
@@ -3318,7 +3260,7 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
                 _new_run_id    = f"slip_{_dt_form.now().strftime('%Y%m%d_%H%M%S')}.run"
                 _new_csv_bytes = None
 
-            _new_run_rec = {}
+            _new_run_rec = {"run_type": _form_run_type}
             if _form_note.strip():
                 _new_run_rec["run_note"] = _form_note.strip()
 
@@ -3449,6 +3391,7 @@ _run_meta_now     = next((r for r in _saved_runs if r["filename"] == csv_name), 
 _active_csv_bytes = load_run_csv_bytes(csv_name) if (_run_meta_now and _run_meta_now["has_csv"]) else None
 _csv_available    = _active_csv_bytes is not None
 
+_ch_prefs = cfg.get("channel_prefs", {})
 if _csv_available:
     df = load_racepak_csv(_active_csv_bytes)
     time_col = get_time_col(df)
@@ -3461,69 +3404,309 @@ if _csv_available:
     for ch in available_channels:
         if ch not in channel_to_group:
             channel_to_group[ch] = "📦 Other"
+    # Apply user's group overrides from the All Channels table
+    for ch in available_channels:
+        if ch in _ch_prefs and _ch_prefs[ch].get("group"):
+            channel_to_group[ch] = _ch_prefs[ch]["group"]
+    # Save full channel list before show-filtering (used by All Channels table)
+    _all_channels_full = list(available_channels)
+    # Compute default show value: hide channels where all data is exactly 0
+    _ch_defaults = {}
+    for _ch0 in _all_channels_full:
+        _s0 = df[_ch0].dropna()
+        _ch_defaults[_ch0] = not (
+            not _s0.empty
+            and float(_s0.min()) == 0.0
+            and float(_s0.max()) == 0.0
+        )
+    # Apply show/hide preferences (user-saved or computed defaults)
+    available_channels = [
+        ch for ch in available_channels
+        if _ch_prefs.get(ch, {}).get("show", _ch_defaults.get(ch, True))
+    ]
     groups_present = list(dict.fromkeys(
         [channel_to_group[ch] for ch in ALL_GROUPED if ch in available_channels]
         + [channel_to_group[ch] for ch in available_channels
            if channel_to_group[ch] not in
            [channel_to_group[c] for c in ALL_GROUPED if c in available_channels]]
     ))
+    # ── Global RacePak scale (computed from full run, not just the visible window) ─
+    _rpm_chs_in_df = [ch for ch in _all_channels_full if ch in RPM_CHANNEL_NAMES]
+    if _rpm_chs_in_df:
+        _global_rpm_max = max(float(df[ch].dropna().max()) for ch in _rpm_chs_in_df)
+    else:
+        _global_rpm_max = 8000.0   # fallback when no RPM channel present
+    # _global_rpm_max drives the dashed reference line; y_min/y_max come from the
+    # RPM Range slider (_chart_rpm_max) and are hardcoded at the call sites.
 else:
     df = None
     time_col = None
     available_channels = []
     channel_to_group = {}
     groups_present = []
+    _all_channels_full = []
+    _ch_defaults = {}
+    _global_rpm_max = 8000.0
 
-# ── Sidebar: Channel Rules (always visible, after Track Location) ─────────────
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚠️ Channel Rules")
-_rules = cfg.get("channel_rules", {})
+# ── Sidebar: RacePak Controls (rendered into slot between Run Manager and RacePak Data) ──
+with _racepak_controls_slot:
+    st.markdown("### 📊 RacePak Controls")
+    if _csv_available:
+        with st.expander("Graph Controls", expanded=False):
+            # 1. Smoothing
+            st.markdown("**Smoothing**")
+            smooth_points = st.slider(
+                "Points", min_value=1, max_value=50, value=25, step=1,
+                key="chart_smooth_points",
+            )
 
-with st.sidebar.expander("Add / Edit Rule", expanded=False):
-    _rule_ch = st.selectbox("Channel", options=[""] + available_channels, key="rule_ch")
-    if _rule_ch:
-        _existing = _rules.get(_rule_ch, {})
-        _col_a, _col_b = st.columns(2)
-        _use_min = _col_a.checkbox("Min", value="min" in _existing, key="rule_use_min")
-        _use_max = _col_b.checkbox("Max", value="max" in _existing, key="rule_use_max")
-        _min_val = _col_a.number_input(
-            "Min value", value=float(_existing.get("min", 0)),
-            disabled=not _use_min, key="rule_min_val",
-        )
-        _max_val = _col_b.number_input(
-            "Max value", value=float(_existing.get("max", 0)),
-            disabled=not _use_max, key="rule_max_val",
-        )
-        if st.button("💾 Save Rule", key="save_rule_btn"):
-            _new_rule = {}
-            if _use_min:
-                _new_rule["min"] = _min_val
-            if _use_max:
-                _new_rule["max"] = _max_val
-            if _new_rule:
-                _rules[_rule_ch] = _new_rule
-                cfg["channel_rules"] = _rules
+            # 2. RPM Range
+            st.markdown("**RPM Range**")
+            _chart_rpm_max = st.slider(
+                "Y-axis ceiling (RPM)", min_value=-10, max_value=15000,
+                value=10000, step=500, key="chart_rpm_max",
+            )
+
+            # 3. Time Range
+            st.markdown("**Time Range**")
+            t_min = float(df[time_col].min())
+            t_max = float(df[time_col].max())
+            t_range = st.slider(
+                "Seconds", min_value=t_min, max_value=max(t_max, 20.0),
+                value=(t_min, min(t_max, 10.0)), step=0.02,
+                key=f"t_range_{csv_name}",
+            )
+            df_view = df[(df[time_col] >= t_range[0]) & (df[time_col] <= t_range[1])]
+
+            # 4. Chart Style
+            st.markdown("**Chart Style**")
+            chart_height = st.slider("Chart height (px)", 200, 600, 320, 50,
+                                     key=f"chart_h_{csv_name}")
+            show_markers = st.checkbox("Show data points", value=False,
+                                       key=f"show_markers_{csv_name}")
+            mode = "lines+markers" if show_markers else "lines"
+
+            # 5. Groups to Show
+            st.markdown("**Groups to Show**")
+            selected_groups = st.multiselect(
+                "Channel groups", options=groups_present, default=groups_present[:4],
+                help="Each group shows all its channels overlaid on one chart",
+                key=f"sel_groups_{csv_name}",
+            )
+
+            # 6. Custom Overlay
+            st.markdown("**Custom Overlay**")
+            custom_channels = st.multiselect(
+                "Pick any channels to compare",
+                options=available_channels,
+                default=[],
+                help="Select two or more channels to plot together on a single chart",
+                key=f"custom_ch_{csv_name}",
+            )
+
+            # 7. Hidden Channels
+            st.markdown("**Hidden Channels**")
+            _flat_channels = [
+                ch for ch in available_channels
+                if df[ch].dropna().nunique() <= 1
+            ]
+            _saved_hidden = cfg.get("hidden_channels", [])
+            _saved_hidden = [ch for ch in _saved_hidden if ch in available_channels]
+            hidden_channels = st.multiselect(
+                "Channels to hide",
+                options=available_channels,
+                default=_saved_hidden,
+                help="These channels are removed from all charts. Flat/no-data channels are good candidates.",
+                key=f"hidden_ch_{csv_name}",
+            )
+            if _flat_channels:
+                _flat_not_hidden = [ch for ch in _flat_channels if ch not in hidden_channels]
+                if _flat_not_hidden:
+                    st.caption(f"💡 Flat (no variation): {', '.join(_flat_not_hidden)}")
+            if hidden_channels != _saved_hidden:
+                cfg["hidden_channels"] = hidden_channels
                 save_config(cfg)
-                st.success(f"Rule saved for {_rule_ch}")
-                st.rerun()
+            available_channels = [ch for ch in available_channels if ch not in hidden_channels]
 
-# List existing rules with remove buttons
-if _rules:
-    for _ch, _rule in list(_rules.items()):
-        _parts = []
-        if "min" in _rule:
-            _parts.append(f"min {_rule['min']}")
-        if "max" in _rule:
-            _parts.append(f"max {_rule['max']}")
-        _rcol1, _rcol2 = st.sidebar.columns([3, 1])
-        _rcol1.caption(f"**{_ch}**: {' · '.join(_parts)}")
-        if _rcol2.button("✕", key=f"del_rule_{_ch}"):
-            del _rules[_ch]
-            cfg["channel_rules"] = _rules
-            save_config(cfg)
+    else:
+        df_view = None
+        selected_groups = []
+        hidden_channels = []
+        custom_channels = []
+        chart_height = 320
+        mode = "lines"
+        _chart_rpm_max = 10000
+        smooth_points = 1
+
+    # ── Channel Rules ─────────────────────────────────────────────────────────
+    _rules = cfg.get("channel_rules", {})
+
+    with st.expander("Channel Rules", expanded=False):
+        with st.expander("Add / Edit Rule", expanded=False):
+            _rule_ch = st.selectbox("Channel", options=[""] + available_channels, key="rule_ch")
+            if _rule_ch:
+                _existing = _rules.get(_rule_ch, {})
+                _col_a, _col_b = st.columns(2)
+                _use_min = _col_a.checkbox("Min", value="min" in _existing, key="rule_use_min")
+                _use_max = _col_b.checkbox("Max", value="max" in _existing, key="rule_use_max")
+                _min_val = _col_a.number_input(
+                    "Min value", value=float(_existing.get("min", 0)),
+                    disabled=not _use_min, key="rule_min_val",
+                )
+                _max_val = _col_b.number_input(
+                    "Max value", value=float(_existing.get("max", 0)),
+                    disabled=not _use_max, key="rule_max_val",
+                )
+                if st.button("💾 Save Rule", key="save_rule_btn"):
+                    _new_rule = {}
+                    if _use_min:
+                        _new_rule["min"] = _min_val
+                    if _use_max:
+                        _new_rule["max"] = _max_val
+                    if _new_rule:
+                        _rules[_rule_ch] = _new_rule
+                        cfg["channel_rules"] = _rules
+                        save_config(cfg)
+                        st.success(f"Rule saved for {_rule_ch}")
+                        st.rerun()
+
+        # List existing rules with remove buttons
+        if _rules:
+            for _ch, _rule in list(_rules.items()):
+                _parts = []
+                if "min" in _rule:
+                    _parts.append(f"min {_rule['min']}")
+                if "max" in _rule:
+                    _parts.append(f"max {_rule['max']}")
+                _rcol1, _rcol2 = st.columns([3, 1])
+                _rcol1.caption(f"**{_ch}**: {' · '.join(_parts)}")
+                if _rcol2.button("✕", key=f"del_rule_{_ch}"):
+                    del _rules[_ch]
+                    cfg["channel_rules"] = _rules
+                    save_config(cfg)
+                    st.rerun()
+        else:
+            st.caption("No rules set yet.")
+
+    st.markdown("---")
+
+# ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
+_admin_user = st.session_state.get("rf_user", "")
+print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys_rf.stderr, flush=True)
+if _admin_user == "weeber70" and _sb:
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("🔒 Admin Panel", expanded=False):
+
+        def _time_ago(ts_str: str) -> str:
+            if not ts_str:
+                return "never"
+            try:
+                from datetime import datetime, timezone
+                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
+                if _s < 60:    return f"{_s}s ago"
+                if _s < 3600:  return f"{_s // 60}m ago"
+                if _s < 86400: return f"{_s // 3600}h ago"
+                return f"{_s // 86400}d ago"
+            except Exception:
+                return ts_str
+
+        # ── Maintenance mode toggle ───────────────────────────────────────────
+        _maint_toggle = st.toggle(
+            "🚧 Maintenance Mode",
+            value=_maintenance_on,
+            key="admin_maint_toggle",
+            help="When ON, all users except weeber70 see the maintenance screen.",
+        )
+        if _maint_toggle != _maintenance_on:
+            _write_maintenance_mode(_maint_toggle)
             st.rerun()
-else:
-    st.sidebar.caption("No rules set yet.")
+
+        st.markdown("---")
+
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            _ten_ago      = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
+            _active_count = len(_active_rows)
+
+            _cred_res    = _sb.table("credentials").select("username", count="exact").execute()
+            _total_users = _cred_res.count or len(_cred_res.data)
+
+            _runs_res    = _sb.table("runs").select("username", count="exact").execute()
+            _total_runs  = _runs_res.count or len(_runs_res.data)
+
+            try:
+                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
+                _total_slip = _slip_res.count or 0
+            except Exception:
+                _total_slip = "—"
+
+            _a1, _a2 = st.columns(2)
+            _a1.metric("Active now",        _active_count)
+            _a2.metric("Accounts",          _total_users)
+            _b1, _b2 = st.columns(2)
+            _b1.metric("Runs logged",       _total_runs)
+            _b2.metric("Timeslips scanned", _total_slip)
+
+            st.markdown("---")
+
+            _all_creds    = _sb.table("credentials").select("username").execute().data
+            _all_sessions = {r["username"]: r["last_seen"]
+                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
+            _run_rows     = _runs_res.data or _sb.table("runs").select("username").execute().data
+            _run_counts   = {}
+            for _rr in _run_rows:
+                _u = _rr.get("username", "")
+                _run_counts[_u] = _run_counts.get(_u, 0) + 1
+
+            # Fetch emails from user_configs
+            _all_emails: dict[str, str] = {}
+            try:
+                _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
+                for _cr in _cfg_rows:
+                    _cfg_blob = _cr.get("config") or {}
+                    if isinstance(_cfg_blob, str):
+                        try: _cfg_blob = json.loads(_cfg_blob)
+                        except Exception: _cfg_blob = {}
+                    _em = _cfg_blob.get("email", "")
+                    if _em:
+                        _all_emails[_cr["username"]] = _em
+            except Exception:
+                pass
+
+            _rows_html = ""
+            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
+                _un  = _cu["username"]
+                _ls  = _time_ago(_all_sessions.get(_un, ""))
+                _rc  = _run_counts.get(_un, 0)
+                _em  = _all_emails.get(_un, "—")
+                _bold = "font-weight:700;" if _un == "weeber70" else ""
+                _rows_html += (
+                    f'<tr>'
+                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
+                    f'<td style="color:#777;padding:3px 6px;font-size:0.78rem;">{_em}</td>'
+                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
+                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
+                    f'</tr>'
+                )
+
+            st.markdown(f"""
+<div style="font-size:0.82rem;font-family:monospace;overflow-x:auto;">
+<table style="width:100%;border-collapse:collapse;">
+<thead><tr>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Email</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
+  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
+</tr></thead>
+<tbody>{_rows_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+
+        except Exception as _admin_err:
+            st.warning(f"Admin data unavailable: {_admin_err}")
 
 # ── Load or init run record ───────────────────────────────────────────────────
 run = load_run(csv_name)
@@ -3658,109 +3841,91 @@ _rd        = run.get("run_details") or cfg.get("car_profile", {})
 _changelog = run.get("changelog", [])
 
 
-# ── Sidebar: chart controls (only shown when CSV is available) ────────────────
-# All widget keys are scoped to csv_name so they reset cleanly when switching runs.
-if _csv_available:
-    st.sidebar.markdown("### Time Range")
-    t_min = float(df[time_col].min())
-    t_max = float(df[time_col].max())
-    t_range = st.sidebar.slider(
-        "Seconds", min_value=t_min, max_value=t_max,
-        value=(t_min, t_max), step=0.02,
-        key=f"t_range_{csv_name}",
-    )
-    df_view = df[(df[time_col] >= t_range[0]) & (df[time_col] <= t_range[1])]
-
-    st.sidebar.markdown("### Groups to Show")
-    selected_groups = st.sidebar.multiselect(
-        "Channel groups", options=groups_present, default=groups_present[:4],
-        help="Each group shows all its channels overlaid on one chart",
-        key=f"sel_groups_{csv_name}",
-    )
-else:
-    df_view = None
-    selected_groups = []
-
-if _csv_available:
-    st.sidebar.markdown("### Hidden Channels")
-    _flat_channels = [
-        ch for ch in available_channels
-        if df[ch].dropna().nunique() <= 1
-    ]
-    _saved_hidden = cfg.get("hidden_channels", [])
-    _saved_hidden = [ch for ch in _saved_hidden if ch in available_channels]
-    hidden_channels = st.sidebar.multiselect(
-        "Channels to hide",
-        options=available_channels,
-        default=_saved_hidden,
-        help="These channels are removed from all charts. Flat/no-data channels are good candidates.",
-        key=f"hidden_ch_{csv_name}",
-    )
-    if _flat_channels:
-        _flat_not_hidden = [ch for ch in _flat_channels if ch not in hidden_channels]
-        if _flat_not_hidden:
-            st.sidebar.caption(f"💡 Flat (no variation): {', '.join(_flat_not_hidden)}")
-    if hidden_channels != _saved_hidden:
-        cfg["hidden_channels"] = hidden_channels
-        save_config(cfg)
-    available_channels = [ch for ch in available_channels if ch not in hidden_channels]
-
-    st.sidebar.markdown("### Custom Overlay")
-    custom_channels = st.sidebar.multiselect(
-        "Pick any channels to compare",
-        options=available_channels,
-        default=[],
-        help="Select two or more channels to plot together on a single chart",
-        key=f"custom_ch_{csv_name}",
-    )
-
-    st.sidebar.markdown("### Chart Style")
-    chart_height = st.sidebar.slider("Chart height (px)", 200, 600, 320, 50,
-                                     key=f"chart_h_{csv_name}")
-    show_markers = st.sidebar.checkbox("Show data points", value=False,
-                                       key=f"show_markers_{csv_name}")
-    mode = "lines+markers" if show_markers else "lines"
-else:
-    hidden_channels = []
-    custom_channels = []
-    chart_height = 320
-    mode = "lines"
 
 # ── Overlay chart helper (defined here so it's available throughout dashboard) ─
 def make_overlay_chart(channels, title, time_col, df_view, t_range, mode, height,
-                       dark=True):
-    """Return a Plotly figure with all listed channels overlaid.
-    Channels with very different value ranges are split onto dual Y-axes.
+                       dark=True, global_rpm_max=8000.0, y_min=-10.0, y_max=10000.0,
+                       smooth_points=1):
+    """RacePak DataLink-style overlay chart with a shared global RPM scale.
+
+    All charts share the same y-axis (y_min / y_max from the RPM Range slider) so
+    every group is directly comparable regardless of what channels it contains.
+    - RPM channels: plotted at actual RPM values.
+    - All other channels: min→max scaled into 0→global_rpm_max; zero-anchored when
+      the channel crosses zero so negative raw values appear below y=0.
+    - Dashed reference line at global_rpm_max (actual run peak, floats below y_max).
+    - Solid zero line drawn whenever y_min < 0.
+    - Hover always shows the channel's actual value.
     """
-    valid = []
-    for ch in channels:
-        vals = df_view[ch].dropna()
-        if not vals.empty:
-            peak = float(vals.abs().max()) if vals.abs().max() > 0 else 1.0
-            valid.append((ch, peak))
+    valid = [ch for ch in channels if not df_view[ch].dropna().empty]
     if not valid:
         return None
-    valid_sorted = sorted(valid, key=lambda x: x[1])
-    peaks = [p for _, p in valid_sorted]
-    use_dual = (peaks[-1] / peaks[0]) > 10 if len(peaks) > 1 else False
-    left_chs  = [ch for ch, p in valid_sorted if p / peaks[0] <= 10]
-    right_chs = [ch for ch, p in valid_sorted if p / peaks[0] >  10]
-    color_index = {ch: i for i, (ch, _) in enumerate(valid)}
+
     fig = go.Figure()
-    for ch in left_chs:
-        i = color_index[ch]
+    _all_scaled_min = 0.0   # tracks the lowest scaled RPM-space value in this group
+
+    for i, ch in enumerate(valid):
+        _c  = TRACE_COLORS[i % len(TRACE_COLORS)]
+        _raw_col = df_view[ch]
+        # Smooth raw values before scaling so rolling avg operates in real units
+        if smooth_points > 1:
+            raw = _raw_col.rolling(window=smooth_points, center=True, min_periods=1).mean()
+        else:
+            raw = _raw_col
+        if ch in RPM_CHANNEL_NAMES:
+            y_plot = raw
+        else:
+            _cmin = float(raw.min())
+            _cmax = float(raw.max())
+            _crng = _cmax - _cmin
+            if _crng == 0:
+                y_plot = pd.Series(
+                    [0.0 if _cmin == 0.0 else global_rpm_max / 2] * len(raw),
+                    index=raw.index,
+                )
+            elif _cmin < 0.0 and _cmax > 0.0:
+                # Zero-anchored: raw=0 → y=0, positive peak → global_rpm_max
+                y_plot = raw * (global_rpm_max / _cmax)
+            else:
+                # All-positive (or all-negative): min→0, max→global_rpm_max
+                y_plot = (raw - _cmin) / _crng * global_rpm_max
+        # Track the actual scaled minimum for this group
+        _ch_scaled_min = float(y_plot.min())
+        if _ch_scaled_min < _all_scaled_min:
+            _all_scaled_min = _ch_scaled_min
         fig.add_trace(go.Scatter(
-            x=df_view[time_col], y=df_view[ch], mode=mode, name=ch, yaxis="y",
-            line=dict(width=2.2, color=TRACE_COLORS[i % len(TRACE_COLORS)]),
+            x=df_view[time_col], y=y_plot,
+            customdata=raw,
+            mode=mode, name=ch,
+            legendgroup=ch, showlegend=False,
+            line=dict(width=1.5, color=_c),
             marker=dict(size=3),
+            hovertemplate=f"<b>{ch}</b>: %{{customdata:.4g}}<extra></extra>",
         ))
-    for ch in right_chs:
-        i = color_index[ch]
         fig.add_trace(go.Scatter(
-            x=df_view[time_col], y=df_view[ch], mode=mode, name=ch, yaxis="y2",
-            line=dict(width=2.2, color=TRACE_COLORS[i % len(TRACE_COLORS)]),
-            marker=dict(size=3),
+            x=[None], y=[None], mode="markers", name=ch,
+            legendgroup=ch, showlegend=True,
+            marker=dict(symbol="square", size=10, color=_c),
         ))
+
+    # Dynamic floor: 15% below the actual scaled minimum if any channel goes
+    # negative in RPM space; otherwise a modest 5% gap below zero.
+    if _all_scaled_min < 0:
+        y_min = _all_scaled_min * 1.15
+    else:
+        y_min = -(y_max * 0.05)
+
+    # Ceiling line at y_max
+    fig.add_hline(
+        y=y_max,
+        line_dash="solid", line_color="rgba(255,255,255,0.5)", line_width=1.5,
+    )
+    # Zero reference line — always drawn, clearly visible as the baseline
+    fig.add_hline(
+        y=0,
+        line_dash="solid", line_color="rgba(255,255,255,0.35)", line_width=1,
+    )
+
     if t_range[0] < 0:
         fig.add_vrect(
             x0=t_range[0], x1=min(0.0, t_range[1]),
@@ -3768,27 +3933,20 @@ def make_overlay_chart(channels, title, time_col, df_view, t_range, mode, height
             annotation_text="pre-launch", annotation_position="top left",
             annotation_font_size=10,
         )
-    layout_extra = {}
-    if use_dual and right_chs:
-        layout_extra["yaxis2"] = dict(
-            overlaying="y", side="right", showgrid=False,
-            tickfont=dict(size=10),
-            title=dict(text=" / ".join(right_chs), font=dict(size=10)),
-        )
     fig.update_layout(
-        height=height,
-        margin=dict(l=0, r=60 if use_dual else 0, t=44, b=0),
-        xaxis_title=f"{time_col} (s)",
+        height=height + 120,
+        margin=dict(t=120, b=40, l=60, r=20),
+        xaxis=dict(title=f"{time_col} (s)", range=[t_range[0], t_range[1]]),
+        yaxis=dict(title="RPM", range=[y_min, y_max], autorange=False, rangemode="normal", tickformat=",d"),
         hovermode="x unified",
         template="plotly_dark" if dark else "plotly_white",
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0,
             font=dict(size=11, color="#e8e8e8"),
             bgcolor="rgba(0,0,0,0.6)",
             bordercolor="rgba(255,255,255,0.1)",
             borderwidth=1,
         ),
-        **layout_extra,
     )
     return fig
 
@@ -3895,6 +4053,17 @@ with _main_left:
     with st.expander("📋 Run Details", expanded=False):
         _rk = csv_name  # widget key shorthand — scoped to run so values reset on switch
         with st.form(f"run_details_form_{_rk}"):
+            # ── Run Type ──────────────────────────────────────────────────
+            _rd_rt_opts    = ["Full Pass", "Half-Track Pass", "Tire Shake / Aborted Run", "Tune-Up Pass", "Other"]
+            _rd_rt_current = run.get("run_type") or "Full Pass"
+            _rd_rt_idx     = _rd_rt_opts.index(_rd_rt_current) if _rd_rt_current in _rd_rt_opts else 0
+            _rd_run_type = st.selectbox(
+                "Run Type",
+                options=_rd_rt_opts,
+                index=_rd_rt_idx,
+                key=f"rd_run_type_{_rk}",
+            )
+            st.divider()
             st.caption("**Tire Pressures (psi)**")
             _rd_col1, _rd_col2 = st.columns(2)
             _rd_tire_fl = _rd_col1.number_input("FL", min_value=0.0, max_value=60.0,
@@ -3984,6 +4153,8 @@ with _main_left:
 
         # Handlers run outside the form context (after the with block) so they
         # fire only on actual submit clicks — never on field changes.
+        if _rd_save or _rd_car_profile:
+            run["run_type"] = _rd_run_type
         if _rd_save:
             run["run_details"] = _rd_payload
             save_run(csv_name, run)
@@ -4849,6 +5020,7 @@ if not _csv_available:
 _egt_group_name = "🌡️ EGT (Exhaust Temps)"
 _egt_chs_set = set(_cyl_channels) | ({_avg_egt_ch} if _avg_egt_ch else set())
 
+st.caption("*Click a legend item to toggle that channel on or off.*")
 for grp in selected_groups:
     if grp == _egt_group_name:
         continue  # already rendered in EGT panel
@@ -4862,7 +5034,9 @@ for grp in selected_groups:
     if not grp_channels:
         continue
 
-    fig = make_overlay_chart(grp_channels, grp, time_col, df_view, t_range, mode, chart_height, dark=_dark_mode)
+    fig = make_overlay_chart(grp_channels, grp, time_col, df_view, t_range, mode, chart_height,
+                             dark=_dark_mode, global_rpm_max=_global_rpm_max,
+                             y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
     if fig:
         st.markdown(f"### {grp}")
         st.plotly_chart(fig, use_container_width=True)
@@ -4870,7 +5044,9 @@ for grp in selected_groups:
 
 # ── Custom Overlay chart ──────────────────────────────────────────────────────
 if custom_channels:
-    fig = make_overlay_chart(custom_channels, "Custom Overlay", time_col, df_view, t_range, mode, chart_height, dark=_dark_mode)
+    fig = make_overlay_chart(custom_channels, "Custom Overlay", time_col, df_view, t_range, mode, chart_height,
+                             dark=_dark_mode, global_rpm_max=_global_rpm_max,
+                             y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
     if fig:
         st.markdown("### 🔀 Custom Overlay")
         st.plotly_chart(fig, use_container_width=True)
@@ -5018,7 +5194,9 @@ if _cyl_channels:
 
     st.caption("**EGT over time — all cylinders**")
     _ts_channels = _cyl_channels + ([_avg_egt_ch] if _avg_egt_ch else [])
-    _ts_fig = make_overlay_chart(_ts_channels, "EGT", time_col, df_view, t_range, mode, 320, dark=_dark_mode)
+    _ts_fig = make_overlay_chart(_ts_channels, "EGT", time_col, df_view, t_range, mode, 320,
+                                 dark=_dark_mode, global_rpm_max=_global_rpm_max,
+                                 y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
     if _ts_fig:
         for trace in _ts_fig.data:
             if trace.name in _cyl_peaks:
@@ -5125,6 +5303,7 @@ for _col, _hdr, _val in zip(_rr_cols, _rr_headers, _rr_vals):
     _col.markdown(f"**{_val}**")
 
 # RacePak peak row
+st.divider()
 st.markdown("##### 📡 RacePak Peaks")
 _rp_items = []
 for _rp_ch, _rp_lbl in [
@@ -5218,6 +5397,88 @@ with _t4:
 # Notes row
 if _sum_rd.get("notes"):
     st.caption(f"📝 Notes: {_sum_rd['notes']}")
+
+st.caption("📡 **All Channels** — Groups and visibility are editable.")
+with st.expander("📡 All Channels"):
+    st.caption("Uncheck channels to hide them from all graphs. Use the Group ✏️ dropdown to move a channel to a different chart.")
+    _UNGROUPED_LABEL = "— Ungrouped —"
+    _group_options   = list(CHANNEL_GROUPS.keys()) + ["📦 Other", _UNGROUPED_LABEL]
+    _col_w = [1, 3, 3, 2, 2, 2, 2]
+
+    # Header row
+    _hdr = st.columns(_col_w)
+    for _hi, _hl in enumerate(["Show", "Channel", "Group ✏️", "Min", "Max", "Mean", "Pts"]):
+        _hdr[_hi].markdown(
+            f"<span style='font-size:0.78rem;font-weight:600;color:#888;'>{_hl}</span>",
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        "<hr style='margin:2px 0 6px 0;border:none;border-top:1px solid rgba(128,128,128,0.35);'>",
+        unsafe_allow_html=True,
+    )
+
+    _changes_made = False
+    _new_ch_prefs  = dict(_ch_prefs)
+
+    for ch in _all_channels_full:
+        s      = df[ch].dropna()
+        _cmin  = round(float(s.min()),  3) if not s.empty else 0.0
+        _cmax  = round(float(s.max()),  3) if not s.empty else 0.0
+        _cmean = round(float(s.mean()), 3) if not s.empty else 0.0
+        _cpts  = int(len(s))
+
+        _stored  = _ch_prefs.get(ch, {})
+        _show    = bool(_stored.get("show", _ch_defaults.get(ch, True)))
+        _raw_grp = channel_to_group.get(ch) or ""
+        _grp     = _raw_grp if _raw_grp in _group_options else _UNGROUPED_LABEL
+        _grp_idx = _group_options.index(_grp) if _grp in _group_options else len(_group_options) - 1
+
+        _row = st.columns(_col_w)
+        _show_val = _row[0].checkbox(
+            "", value=_show,
+            key=f"ach_show_{csv_name}_{ch}",
+            label_visibility="collapsed",
+        )
+        _row[1].markdown(ch)
+        _grp_val = _row[2].selectbox(
+            "", options=_group_options, index=_grp_idx,
+            key=f"ach_grp_{csv_name}_{ch}",
+            label_visibility="collapsed",
+        )
+        _row[3].markdown(f"{_cmin:.3f}")
+        _row[4].markdown(f"{_cmax:.3f}")
+        _row[5].markdown(f"{_cmean:.3f}")
+        _row[6].markdown(str(_cpts))
+        st.markdown(
+            "<hr style='margin:0;border:none;border-top:1px solid rgba(128,128,128,0.12);'>",
+            unsafe_allow_html=True,
+        )
+
+        # Accumulate any changes
+        _save_grp = "📦 Other" if _grp_val == _UNGROUPED_LABEL else _grp_val
+        _old_grp  = "📦 Other" if _grp    == _UNGROUPED_LABEL else _grp
+        if _show_val != _show or _save_grp != _old_grp:
+            _new_ch_prefs[ch] = {"show": _show_val, "group": _save_grp}
+            _changes_made = True
+
+    if _changes_made:
+        cfg["channel_prefs"] = _new_ch_prefs
+        save_config(cfg)
+        st.rerun()
+
+# ── Raw data ──────────────────────────────────────────────────────────────────
+with st.expander("📋 Raw Data Table"):
+    st.dataframe(df_view, use_container_width=True, height=400)
+    st.download_button(
+        "⬇️ Download filtered CSV",
+        data=df_view.to_csv(index=False).encode("utf-8"),
+        file_name="racefusion_filtered.csv",
+        mime="text/csv",
+    )
+
+if _admin_user == "weeber70":
+    with st.expander("🗂️ Run Record (JSON)", expanded=False):
+        st.json(run)
 
 # ── Export all runs ───────────────────────────────────────────────────────────
 st.markdown("---")
@@ -5322,31 +5583,3 @@ if _export_cols[0].button("⬇️ Export all runs to CSV"):
     else:
         st.info("No saved runs to export.")
 
-st.markdown("---")
-
-# ── Raw data ──────────────────────────────────────────────────────────────────
-with st.expander("📋 Raw Data Table"):
-    st.dataframe(df_view, use_container_width=True, height=400)
-    st.download_button(
-        "⬇️ Download filtered CSV",
-        data=df_view.to_csv(index=False).encode("utf-8"),
-        file_name="racefusion_filtered.csv",
-        mime="text/csv",
-    )
-
-with st.expander("📡 All Channels"):
-    info_rows = []
-    for ch in available_channels:
-        s = df[ch].dropna()
-        info_rows.append({
-            "Channel": ch,
-            "Group": channel_to_group.get(ch, "Other"),
-            "Min": round(s.min(), 3) if not s.empty else "—",
-            "Max": round(s.max(), 3) if not s.empty else "—",
-            "Mean": round(s.mean(), 3) if not s.empty else "—",
-            "Non-null pts": len(s),
-        })
-    st.dataframe(pd.DataFrame(info_rows), use_container_width=True)
-
-with st.expander("🗂️ Run Record (JSON)"):
-    st.json(run)

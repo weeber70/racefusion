@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>UptimeRobot Setup — Keep RaceFusion Awake</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0e0e0e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #ccc;
+    padding: 40px 20px;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  h1 {
+    color: #e03030;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 36px;
+  }
+  .step {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .num {
+    background: #e03030;
+    color: #fff;
+    font-weight: 800;
+    font-size: 14px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .content { flex: 1; }
+  .content strong {
+    color: #fff;
+    font-size: 15px;
+    display: block;
+    margin-bottom: 5px;
+  }
+  .content p {
+    font-size: 13px;
+    line-height: 1.6;
+    color: #999;
+  }
+  .url-box {
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: monospace;
+    font-size: 13px;
+    color: #e03030;
+    margin-top: 10px;
+    word-break: break-all;
+  }
+  .tip {
+    background: #1a1a0a;
+    border: 1px solid #3a3a00;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-top: 24px;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.6;
+  }
+  .tip strong { color: #ffcc00; }
+  a { color: #e03030; }
+</style>
+</head>
+<body>
+
+<h1>🏁 Keep RaceFusion Awake</h1>
+<div class="subtitle">UptimeRobot setup — free, takes 5 minutes</div>
+
+<div class="step">
+  <div class="num">1</div>
+  <div class="content">
+    <strong>Create a free account</strong>
+    <p>Go to <a href="https://uptimerobot.com" target="_blank">uptimerobot.com</a> and sign up for a free account. No credit card needed.</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">2</div>
+  <div class="content">
+    <strong>Add a new monitor</strong>
+    <p>After logging in, click <strong style="color:#fff">+ Add New Monitor</strong> in the top left.</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">3</div>
+  <div class="content">
+    <strong>Configure the monitor</strong>
+    <p>Set these values:</p>
+    <p style="margin-top:8px">• <strong style="color:#fff">Monitor Type:</strong> HTTP(s)</p>
+    <p>• <strong style="color:#fff">Friendly Name:</strong> RaceFusion</p>
+    <p>• <strong style="color:#fff">URL:</strong> your Streamlit app URL</p>
+    <div class="url-box">https://your-app-name.streamlit.app</div>
+    <p style="margin-top:8px">• <strong style="color:#fff">Monitoring Interval:</strong> Every 5 minutes</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">4</div>
+  <div class="content">
+    <strong>Save the monitor</strong>
+    <p>Click <strong style="color:#fff">Create Monitor</strong>. UptimeRobot will immediately start pinging your app every 5 minutes, keeping it from sleeping.</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">5</div>
+  <div class="content">
+    <strong>Confirm it's working</strong>
+    <p>Within a few minutes the monitor will show a green <strong style="color:#00cc66">UP</strong> status. That means it's pinging successfully and your app will stay awake.</p>
+  </div>
+</div>
+
+<div class="tip">
+  <strong>💡 Tip:</strong> UptimeRobot will also email you if your app ever goes down unexpectedly — useful to know when you have real users.
+</div>
+
+</body>
+</html>
