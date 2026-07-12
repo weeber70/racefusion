@@ -31,7 +31,7 @@ st.set_page_config(
 )
 
 # ── Logo loader ───────────────────────────────────────────────────────────────
-def _load_logo_b64(filename: str = "racefusion_logo.png") -> str | None:
+def _load_logo_b64(filename: str = "RaceFusion-Logo-V2.png") -> str | None:
     """Return base64 data-URI for the logo if the file exists next to app.py."""
     p = Path(__file__).parent / filename
     if p.exists():
@@ -41,7 +41,7 @@ def _load_logo_b64(filename: str = "racefusion_logo.png") -> str | None:
         return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
     return None
 
-_LOGO_SRC = _load_logo_b64("RaceFusion.jpg")
+_LOGO_SRC = _load_logo_b64("RaceFusion-Logo-V2.png")
 
 # ── Theme CSS ─────────────────────────────────────────────────────────────────
 def _inject_theme(dark: bool):
@@ -584,10 +584,10 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 </style>""", unsafe_allow_html=True)
 
     # ── Login / Register UI ───────────────────────────────────────────────────
-    _LOGO_SRC_LOGIN = _load_logo_b64("RaceFusion.jpg")
+    _LOGO_SRC_LOGIN = _load_logo_b64("RaceFusion-Logo-V2.png")
     if _LOGO_SRC_LOGIN:
         st.markdown(
-            f'<img src="{_LOGO_SRC_LOGIN}" style="max-width:420px;width:55%;'
+            f'<img src="{_LOGO_SRC_LOGIN}" style="max-width:600px;width:80%;'
             f'margin:32px auto 8px auto;display:block;">',
             unsafe_allow_html=True,
         )
@@ -1679,7 +1679,7 @@ header,[data-testid="stHeader"]{display:none!important}
 </style>""", unsafe_allow_html=True)
 
         _maint_email = cfg.get("email", "")
-        _maint_logo  = _load_logo_b64("RaceFusion.jpg")
+        _maint_logo  = _load_logo_b64("RaceFusion-Logo-V2.png")
 
         st.markdown(
             f"""
@@ -2077,15 +2077,6 @@ if _active_run_id and not _user_changed_run:
         st.query_params.pop("run", None)
     # If _saved_runs is empty, Supabase may have failed — preserve active_run_id
 
-if "_restore_run_selector" in st.session_state:
-    _pending_idx = st.session_state.pop("_restore_run_selector")
-    # Only apply if active_run_id still matches what we were restoring
-    _current_aid = st.session_state.get("active_run_id")
-    if _current_aid and _pending_idx > 0:
-        _expected_name = _saved_runs[_pending_idx - 1]["filename"] if _pending_idx <= len(_saved_runs) else None
-        if _expected_name == _current_aid:
-            st.session_state["run_selector"] = _pending_idx
-
 _run_options  = [_NEW_RUN] + [r["label"] for r in _saved_runs]
 _safe_sel_idx = min(
     st.session_state.get("_run_selector_idx", 0),
@@ -2107,22 +2098,6 @@ if _sel_idx_raw > 0 and (_sel_idx_raw - 1) >= len(_saved_runs):
     _sel_idx_raw = 0
     st.session_state["run_selector"] = 0
     st.session_state["_run_selector_idx"] = 0
-
-# Guard against false-positive "user changed run" caused by widget reset after st.rerun()
-if _user_changed_run and _sel_idx_raw == 0:
-    _aid = st.session_state.get("active_run_id")
-    _qp  = st.query_params.get("run")
-    if _aid and _qp == _aid:
-        # active_run_id and query params both confirm a run is active —
-        # the selectbox reset to 0 due to st.rerun(), not user action. Ignore it.
-        _user_changed_run = False
-        _true_idx = next(
-            (i + 1 for i, r in enumerate(_saved_runs) if r["filename"] == _aid), 0
-        )
-        if _true_idx > 0:
-            st.session_state["_restore_run_selector"] = _true_idx
-            st.session_state["_run_selector_idx"] = _true_idx
-            _sel_idx_raw = _true_idx
 
 # Set active run state and keep active_run_id in sync with the selectbox.
 # NOTE: _active_csv_bytes is NOT loaded here — it's loaded after the processing
@@ -2932,7 +2907,7 @@ if st.session_state.get("current_page") == "season":
 
     _ssm_fmt = lambda v, fmt: fmt.format(v) if v is not None else "—"
 
-    # ── Season Stats card ─────────────────────────────────────────────────────
+    # ── Stats card helpers ────────────────────────────────────────────────────
     def _ssm_stat_row(label, value, color="#eee", bold=False):
         fw = "font-weight:700;" if bold else ""
         return (f'<tr>'
@@ -2940,44 +2915,88 @@ if st.session_state.get("current_page") == "season":
                 f'<td style="color:{color};{fw}text-align:right;padding:4px 0;">{value}</td>'
                 f'</tr>')
 
-    _ssm_wl_parts = []
-    # Always show W-L-Bye counts; dim to #555 when zero so the non-zero ones pop
+    # Always show W-L-Bye counts; dim to #444 when zero so the non-zero ones pop
     def _wl_num(n, color, label):
         c = color if n > 0 else "#444"
         return f"<span style='color:{c};font-weight:{'700' if n > 0 else '400'};'>{n}&nbsp;{label}</span>"
-    _ssm_wl_html = (
-        _wl_num(_ssm_wins,   "#2ecc71", "W") +
-        " <span style='color:#333;'>&nbsp;·&nbsp;</span> " +
-        _wl_num(_ssm_losses, "#e74c3c", "L") +
-        (" <span style='color:#333;'>&nbsp;·&nbsp;</span> " + _wl_num(_ssm_byes, "#f0a500", "Bye") if _ssm_byes else "")
-    )
-    _ssm_win_pct_str = f"{_ssm_win_pct:.1f}%" if _ssm_win_pct is not None else ("—" if _ssm_decided == 0 else "0.0%")
 
-    _ssm_stat_rows = (
-        _ssm_stat_row("Total Runs",       str(len(_ssm_runs)),                     color="#eee",    bold=True) +
-        _ssm_stat_row("Best ET",          _ssm_fmt(_ssm_best_et,  "{:.3f} s"),     color="#ffcc00", bold=True) +
-        _ssm_stat_row("Best MPH",         _ssm_fmt(_ssm_best_mph, "{:.2f} mph"),   color="#cc1111", bold=True) +
-        (_ssm_stat_row("Best 60ft",       _ssm_fmt(_ssm_best_60,  "{:.3f} s"),     color="#4db8ff") if _ssm_60s  else "") +
-        (_ssm_stat_row("Best Reaction",   _ssm_fmt(_ssm_best_rt,  "{:.3f} s"),     color="#2ecc71") if _ssm_rts  else "") +
-        f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Record</td>'
-        f'<td style="text-align:right;padding:4px 0;">{_ssm_wl_html}</td></tr>' +
-        f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Win %</td>'
-        f'<td style="color:{"#2ecc71" if _ssm_win_pct and _ssm_win_pct >= 50 else "#eee"};'
-        f'font-weight:{"700" if _ssm_decided > 0 else "400"};text-align:right;padding:4px 0;">'
-        f'{_ssm_win_pct_str}</td></tr>'
-    )
+    def _ssm_agg(run_list):
+        """Aggregate stats over an arbitrary list of annotated run dicts."""
+        def _f(key):
+            vals = []
+            for r in run_list:
+                v = r["slip"].get(key)
+                if v is not None:
+                    try:
+                        vals.append(float(v))
+                    except (ValueError, TypeError):
+                        pass
+            return vals
+        ets  = _f("ft_1320")
+        mphs = _f("mph_1320")
+        s60s = _f("ft_60")
+        rts  = _f("reaction_time")
+        wins    = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Win")
+        losses  = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Loss")
+        byes    = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Bye")
+        decided = wins + losses
+        return dict(
+            n        = len(run_list),
+            best_et  = min(ets)  if ets  else None,
+            best_mph = max(mphs) if mphs else None,
+            best_60  = min(s60s) if s60s else None,
+            best_rt  = min(rts)  if rts  else None,
+            wins=wins, losses=losses, byes=byes, decided=decided,
+            win_pct  = (wins / decided * 100) if decided > 0 else None,
+        )
 
-    st.markdown(f"""
-<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
-  background:#0a0a0a;font-family:monospace;max-width:480px;">
-  <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
-    border-bottom:1px solid #2a0000;padding-bottom:6px;">
-    🏆 {_ssm_sel_year} Season Stats
-  </div>
-  <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">
-    {_ssm_stat_rows}
-  </table>
-</div>""", unsafe_allow_html=True)
+    def _ssm_build_card(st_obj, title):
+        """Render a stats card into *st_obj* (either a column or st)."""
+        wl_html = (
+            _wl_num(st_obj["wins"],   "#2ecc71", "W") +
+            " <span style='color:#333;'>&nbsp;·&nbsp;</span> " +
+            _wl_num(st_obj["losses"], "#e74c3c", "L") +
+            (" <span style='color:#333;'>&nbsp;·&nbsp;</span> " +
+             _wl_num(st_obj["byes"], "#f0a500", "Bye") if st_obj["byes"] else "")
+        )
+        wp  = st_obj["win_pct"]
+        dec = st_obj["decided"]
+        win_pct_str = f"{wp:.1f}%" if wp is not None else ("—" if dec == 0 else "0.0%")
+        rows = (
+            _ssm_stat_row("Total Runs",     str(st_obj["n"]),                             color="#eee",    bold=True) +
+            _ssm_stat_row("Best ET",        _ssm_fmt(st_obj["best_et"],  "{:.3f} s"),     color="#ffcc00", bold=True) +
+            _ssm_stat_row("Best MPH",       _ssm_fmt(st_obj["best_mph"], "{:.2f} mph"),   color="#cc1111", bold=True) +
+            (_ssm_stat_row("Best 60ft",     _ssm_fmt(st_obj["best_60"],  "{:.3f} s"),     color="#4db8ff") if st_obj["best_60"]  is not None else "") +
+            (_ssm_stat_row("Best Reaction", _ssm_fmt(st_obj["best_rt"],  "{:.3f} s"),     color="#2ecc71") if st_obj["best_rt"]  is not None else "") +
+            f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Record</td>'
+            f'<td style="text-align:right;padding:4px 0;">{wl_html}</td></tr>' +
+            f'<tr><td style="color:#888;padding:4px 12px 4px 0;white-space:nowrap;">Win %</td>'
+            f'<td style="color:{"#2ecc71" if wp and wp >= 50 else "#eee"};'
+            f'font-weight:{"700" if dec > 0 else "400"};text-align:right;padding:4px 0;">'
+            f'{win_pct_str}</td></tr>'
+        )
+        return (f'<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;'
+                f'background:#0a0a0a;font-family:monospace;">'
+                f'<div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;'
+                f'border-bottom:1px solid #2a0000;padding-bottom:6px;">{title}</div>'
+                f'<table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{rows}</table>'
+                f'</div>')
+
+    # ── Render Season Stats + All-Time Best side by side ─────────────────────
+    _ssm_season_stats  = _ssm_agg(_ssm_runs)
+    _ssm_alltime_stats = _ssm_agg(_ssm_all)
+
+    _col_season, _col_alltime = st.columns(2)
+    with _col_season:
+        st.markdown(
+            _ssm_build_card(_ssm_season_stats, f"🏆 {_ssm_sel_year} Season Stats"),
+            unsafe_allow_html=True,
+        )
+    with _col_alltime:
+        st.markdown(
+            _ssm_build_card(_ssm_alltime_stats, "🏆 All-Time Best Stats"),
+            unsafe_allow_html=True,
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -3196,7 +3215,7 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
     if _LOGO_SRC:
         st.markdown(
             f'<div style="text-align:center;padding:32px 20px 8px;">'
-            f'<img src="{_LOGO_SRC}" style="max-width:460px;width:65%;"></div>',
+            f'<img src="{_LOGO_SRC}" style="max-width:600px;width:80%;"></div>',
             unsafe_allow_html=True,
         )
     else:
@@ -3377,7 +3396,19 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
 
             st.session_state["active_run_id"] = _new_run_id
             st.query_params["run"] = _new_run_id
-            st.session_state.pop("_restore_run_selector", None)
+            # Increment key gen AND explicitly purge all old form widget data from session state
+            _old_gen = st.session_state["upload_gen"]
+            st.session_state["upload_gen"] = _old_gen + 1
+            for _stale_key in [
+                f"create_csv_{_old_gen}",
+                f"create_slip_{_old_gen}",
+                f"create_car_num_{_old_gen}",
+                f"create_run_type_{_old_gen}",
+                f"create_note_{_old_gen}",
+                f"create_run_btn_{_old_gen}",
+                "_last_uploaded_csv",
+            ]:
+                st.session_state.pop(_stale_key, None)
             st.rerun()
 
     st.stop()
@@ -3981,8 +4012,18 @@ if _sc_col2.button("✅ Save & Close Run", use_container_width=True, type="prima
                    key="save_close_btn",
                    help="Saves all run data and returns to upload screen for the next run"):
     # Just reset the UI — keep CSV, timeslip image, and JSON all intact
-    st.session_state["upload_gen"] += 1
-    st.session_state.pop("_last_uploaded_csv", None)   # allow clean re-upload of same filename
+    _old_gen = st.session_state["upload_gen"]
+    st.session_state["upload_gen"] = _old_gen + 1
+    for _stale_key in [
+        f"create_csv_{_old_gen}",
+        f"create_slip_{_old_gen}",
+        f"create_car_num_{_old_gen}",
+        f"create_run_type_{_old_gen}",
+        f"create_note_{_old_gen}",
+        f"create_run_btn_{_old_gen}",
+        "_last_uploaded_csv",
+    ]:
+        st.session_state.pop(_stale_key, None)
     st.session_state["_reset_selector"] = True
     st.rerun()
 
