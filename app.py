@@ -34,6 +34,31 @@ def _get_secret(key: str, default: str = "") -> str:
     except Exception:
         return default
 
+def _has_feature(feature: str) -> bool:
+    """Return True if the current user's tier includes this feature.
+
+    Paid tier always takes priority over trial status — a Racer subscriber
+    is gated on Pro features even if their trial window hasn't fully expired.
+    """
+    tier         = st.session_state.get("sub_tier", "trial")
+    trial_active = st.session_state.get("trial_active", False)
+    _pro_only    = {"csv_upload", "channel_charts", "ai_tuner"}
+
+    # Paid tiers evaluated first — tier gates override trial flag.
+    if tier == "crew_chief":
+        return True
+    if tier == "pro":
+        return True
+    if tier == "racer":
+        return feature not in _pro_only  # racer blocked from pro-only features
+
+    # No paid tier — fall back to trial status.
+    if trial_active:
+        return True  # active trial gets everything
+
+    # Expired trial — block pro-only features.
+    return feature not in _pro_only
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="RaceFusion",
@@ -569,33 +594,73 @@ def _get_tier_from_price_id(price_id: str) -> str:
 
 def _check_stripe_subscription(email: str, username: str) -> str | None:
     """
-    Poll Stripe for an active subscription for this email.
+    Poll Stripe for an active subscription.
+    Prefers the stored stripe_customer_id; falls back to email lookup.
     Returns tier name ('racer'|'pro'|'crew_chief') if active, else None.
     Side-effects: updates credentials table with stripe_customer_id and tier.
     """
+    print(f"[RF-STRIPE] _check_stripe_subscription called: username={username!r} email={email!r}",
+          file=_sys_rf.stderr, flush=True)
     if not _stripe_mod or not _stripe_mod.api_key:
+        print("[RF-STRIPE] skipping — stripe not configured", file=_sys_rf.stderr, flush=True)
         return None
-    if not email:
-        return None
+
     try:
-        customers = _stripe_mod.Customer.list(email=email, limit=1)
-        if not customers.data:
+        # 1. Try to get the stored customer ID from Supabase first.
+        _stored_cust_id: str | None = None
+        if _sb and username:
+            try:
+                _cred = _sb.table("credentials").select("stripe_customer_id") \
+                            .eq("username", username).execute().data
+                if _cred:
+                    _stored_cust_id = _cred[0].get("stripe_customer_id") or None
+            except Exception as _ce:
+                print(f"[RF-STRIPE] cred lookup error: {_ce}", file=_sys_rf.stderr, flush=True)
+
+        print(f"[RF-STRIPE] stored_cust_id={_stored_cust_id!r}", file=_sys_rf.stderr, flush=True)
+
+        # 2. Resolve the Stripe Customer object.
+        cust = None
+        if _stored_cust_id:
+            try:
+                cust = _stripe_mod.Customer.retrieve(_stored_cust_id)
+            except Exception as _re:
+                print(f"[RF-STRIPE] customer retrieve failed: {_re}", file=_sys_rf.stderr, flush=True)
+        if cust is None and email:
+            _clist = _stripe_mod.Customer.list(email=email, limit=1)
+            if _clist.data:
+                cust = _clist.data[0]
+                print(f"[RF-STRIPE] found customer by email: {cust.id}", file=_sys_rf.stderr, flush=True)
+            else:
+                print(f"[RF-STRIPE] no customer found for email={email!r}", file=_sys_rf.stderr, flush=True)
+        if cust is None:
             return None
-        cust = customers.data[0]
-        subs = _stripe_mod.Subscription.list(customer=cust.id, status="active", limit=1)
+
+        # 3. List active subscriptions.
+        subs = _stripe_mod.Subscription.list(customer=cust.id, status="active", limit=5)
+        print(f"[RF-STRIPE] active subs count={len(subs.data)} for customer={cust.id}",
+              file=_sys_rf.stderr, flush=True)
         if not subs.data:
             return None
+
         price_id = subs.data[0].items.data[0].price.id
         tier = _get_tier_from_price_id(price_id)
+        print(f"[RF-STRIPE] price_id={price_id!r} → tier={tier!r}", file=_sys_rf.stderr, flush=True)
+
+        # 4. Persist customer ID and tier back to Supabase.
         if _sb:
             try:
                 _sb.table("credentials").update({
                     "stripe_customer_id": cust.id,
                     "subscription_tier":  tier,
                 }).eq("username", username).execute()
-            except Exception:
-                pass
+                print(f"[RF-STRIPE] updated credentials: tier={tier!r} cust={cust.id}",
+                      file=_sys_rf.stderr, flush=True)
+            except Exception as _ue:
+                print(f"[RF-STRIPE] credentials update failed: {_ue}", file=_sys_rf.stderr, flush=True)
+
         return tier
+
     except Exception as _e:
         print(f"[RF-STRIPE] subscription check failed: {_e}", file=_sys_rf.stderr, flush=True)
         return None
@@ -665,16 +730,17 @@ def _verify_login(username: str, password: str) -> bool:
     except Exception:
         return False
 
-def _register_user(username: str, password: str) -> bool:
+def _register_user(username: str, password: str, email: str = "") -> bool:
     if not _sb: return False
     salt, hsh = _hash_password(password)
     try:
         _sb.table("credentials").insert({
-            "username":         username,
-            "salt":             salt,
-            "password_hash":    hsh,
+            "username":          username,
+            "email":             email,
+            "salt":              salt,
+            "password_hash":     hsh,
             "subscription_tier": "trial",
-            "trial_start_date": _dt.now(_tz.utc).isoformat(),
+            "trial_start_date":  _dt.now(_tz.utc).isoformat(),
         }).execute()
         return True
     except Exception:
@@ -766,6 +832,68 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
             else:
                 st.error("Username not found. Create an account on the right.")
 
+        with st.expander("Forgot your username or password?"):
+            _fgt_tab_user, _fgt_tab_pass = st.tabs(["Forgot Username", "Forgot Password"])
+
+            with _fgt_tab_user:
+                st.caption("Enter the email address you registered with.")
+                _fgt_email = st.text_input("Email address", key="fgt_email",
+                                           placeholder="you@example.com")
+                if st.button("Look up username", key="fgt_email_btn"):
+                    _fgt_em = _fgt_email.strip().lower()
+                    if not _fgt_em:
+                        st.warning("Please enter your email address.")
+                    elif not _sb:
+                        st.error("Database unavailable.")
+                    else:
+                        try:
+                            # Email is stored in user_configs as part of the JSON config blob.
+                            _cfg_rows = _sb.table("user_configs").select("username, config").execute().data
+                            _matched_user = None
+                            for _row in (_cfg_rows or []):
+                                try:
+                                    _cfg_blob = json.loads(_row.get("config") or "{}")
+                                    if _cfg_blob.get("email", "").strip().lower() == _fgt_em:
+                                        _matched_user = _row["username"]
+                                        break
+                                except Exception:
+                                    pass
+                            if _matched_user:
+                                st.success(f"Your username is: **{_matched_user}**")
+                            else:
+                                st.error("No account found with that email address.")
+                        except Exception as _fgt_e:
+                            st.error(f"Lookup failed: {_fgt_e}")
+
+            with _fgt_tab_pass:
+                st.caption("Enter your username to receive a temporary password.")
+                _fgt_uname = st.text_input("Username", key="fgt_uname",
+                                           placeholder="your username")
+                if st.button("Reset password", key="fgt_pass_btn"):
+                    _fgt_u = _fgt_uname.strip().lower()
+                    if not _fgt_u:
+                        st.warning("Please enter your username.")
+                    elif not _sb:
+                        st.error("Database unavailable.")
+                    elif not _check_user_exists(_fgt_u):
+                        st.error("Username not found.")
+                    else:
+                        try:
+                            _tmp_pass = _secrets.token_urlsafe(10)   # e.g. "Xk3mQ9vR2p_A"
+                            _new_salt, _new_hash = _hash_password(_tmp_pass)
+                            _sb.table("credentials").update({
+                                "salt":          _new_salt,
+                                "password_hash": _new_hash,
+                            }).eq("username", _fgt_u).execute()
+                            st.success(
+                                f"Temporary password set. Log in with:\n\n"
+                                f"**Username:** `{_fgt_u}`  \n"
+                                f"**Temp password:** `{_tmp_pass}`\n\n"
+                                f"Change your password in Account Settings after logging in."
+                            )
+                        except Exception as _rst_e:
+                            st.error(f"Password reset failed: {_rst_e}")
+
     with _auth_tab_reg:
         st.markdown("### Create Account")
         st.caption("All fields are required.")
@@ -797,7 +925,7 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
             elif _check_user_exists(_u):
                 st.error("Username already taken. Please choose a different username.")
             else:
-                if _register_user(_u, _reg_pass):
+                if _register_user(_u, _reg_pass, email=_em):
                     # Save initial config with email
                     if _sb:
                         try:
@@ -1809,6 +1937,31 @@ def calc_rwhp(weight_lbs: float, et: float | None, mph: float | None) -> dict:
 # ── Load config once, before any sidebar widgets that need it ─────────────────
 cfg = load_config()
 
+# ── One-time email backfill: copy email from user_configs → credentials ───────
+# Runs once per session per user. Safe to repeat; skips rows that already have email.
+if _sb and _current_user and not st.session_state.get("_email_backfill_done"):
+    try:
+        _bf_cred = _sb.table("credentials").select("email") \
+                       .eq("username", _current_user).execute().data
+        if _bf_cred and not _bf_cred[0].get("email"):
+            _bf_cfg = _sb.table("user_configs").select("config") \
+                          .eq("username", _current_user).execute().data
+            if _bf_cfg:
+                try:
+                    _bf_email = json.loads(_bf_cfg[0].get("config") or "{}").get("email", "")
+                except Exception:
+                    _bf_email = ""
+            else:
+                _bf_email = cfg.get("email", "")
+            if _bf_email:
+                _sb.table("credentials").update({"email": _bf_email}) \
+                   .eq("username", _current_user).execute()
+                print(f"[RF-MIGRATION] backfilled email for {_current_user!r}: {_bf_email!r}",
+                      file=_sys_rf.stderr, flush=True)
+    except Exception as _bf_e:
+        print(f"[RF-MIGRATION] email backfill failed: {_bf_e}", file=_sys_rf.stderr, flush=True)
+    st.session_state["_email_backfill_done"] = True
+
 # ── Subscription state — resolved once per session ────────────────────────────
 # Clear cached state if returning from Stripe Checkout success
 if "stripe_success" in st.query_params:
@@ -1822,6 +1975,14 @@ if "sub_tier" not in st.session_state:
     # Poll Stripe for fresh status (only if not already on a paid tier)
     if _stored_tier not in ("racer", "pro", "crew_chief"):
         _user_email = cfg.get("email", "")
+        if _sb:
+            try:
+                _cred_email_row = _sb.table("credentials").select("email") \
+                                      .eq("username", _current_user).execute().data
+                if _cred_email_row and _cred_email_row[0].get("email"):
+                    _user_email = _cred_email_row[0]["email"]
+            except Exception:
+                pass
         _stripe_tier = _check_stripe_subscription(_user_email, _current_user)
         if _stripe_tier:
             _stored_tier = _stripe_tier
@@ -2373,8 +2534,8 @@ elif _active_csv_name and _active_csv_name.endswith(".run"):
     # Timeslip-only run — auto-process CSV as soon as one is selected
     _csv_up_key    = f"_add_csv_up_{_active_csv_name}"
     _csv_saved_key = f"_csv_saved_{_active_csv_name}"
-    if not _access_granted:
-        st.sidebar.caption("🔒 Upgrade to add Run Data CSV")
+    if not _has_feature("csv_upload"):
+        st.sidebar.caption("🔒 CSV upload available on Pro and above.")
         _add_csv_file = None
     else:
         _add_csv_file  = st.sidebar.file_uploader(
@@ -2683,6 +2844,7 @@ if _current_user == "weeber70" and _sb:
                 _run_counts[_u] = _run_counts.get(_u, 0) + 1
 
             _all_emails: dict[str, str] = {}
+            # 1. Seed from user_configs JSON blob (legacy store)
             try:
                 _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
                 for _cr in _cfg_rows:
@@ -2693,6 +2855,15 @@ if _current_user == "weeber70" and _sb:
                     _em = _cfg_blob.get("email", "")
                     if _em:
                         _all_emails[_cr["username"]] = _em
+            except Exception:
+                pass
+            # 2. Override/fill from credentials.email (authoritative column)
+            try:
+                _cred_email_rows = _sb.table("credentials").select("username,email").execute().data
+                for _cer in _cred_email_rows:
+                    _em = _cer.get("email") or ""
+                    if _em:
+                        _all_emails[_cer["username"]] = _em
             except Exception:
                 pass
 
@@ -3541,16 +3712,46 @@ if st.session_state.get("current_page") == "upgrade":
 
     st.markdown("# ⬆️ Upgrade RaceFusion")
 
+    # ── Proactive Stripe check on every upgrade page load for trial users ─────
+    # Catches missed redirects (browser closed, Streamlit restart, etc.).
+    if _sub_tier not in ("racer", "pro", "crew_chief") and _sb:
+        try:
+            _pro_cred = _sb.table("credentials").select("email, stripe_customer_id") \
+                            .eq("username", _current_user).execute().data
+            _pro_email = (_pro_cred[0].get("email") or cfg.get("email", "")) if _pro_cred else cfg.get("email", "")
+        except Exception:
+            _pro_email = cfg.get("email", "")
+        _live_tier = _check_stripe_subscription(_pro_email, _current_user)
+        if _live_tier and _live_tier not in ("trial", None):
+            st.session_state["sub_tier"]        = _live_tier
+            st.session_state["trial_active"]    = False
+            st.session_state["access_granted"]  = True
+            st.session_state["charts_granted"]  = _live_tier in ("pro", "crew_chief")
+            _sub_tier = _live_tier
+            st.rerun()
+
     # ── Post-payment success handler ──────────────────────────────────────────
     if st.query_params.get("success") == "true":
-        _cs_id = st.query_params.get("cs_id", "")
-        st.query_params.clear()          # always clear — prevents any re-trigger
+        _cs_id       = st.query_params.get("cs_id", "")
+        _saved_sess  = st.query_params.get("session", "")
+        st.query_params.clear()                    # wipe all params including success/cs_id
+        if _saved_sess:
+            st.query_params["session"] = _saved_sess   # restore session token so user stays logged in
         if not _cs_id or not _cs_id.startswith("cs_"):
             # Stale bookmark or manually crafted URL — ignore silently.
             pass
         else:
             # Valid Stripe checkout session ID — poll Stripe to confirm.
+            # Fetch email from credentials so it's accurate even if cfg is stale.
             _pay_email = cfg.get("email", "")
+            if _sb:
+                try:
+                    _cred_row = _sb.table("credentials").select("email, stripe_customer_id") \
+                                    .eq("username", _current_user).execute().data
+                    if _cred_row and _cred_row[0].get("email"):
+                        _pay_email = _cred_row[0]["email"]
+                except Exception:
+                    pass
             _new_tier  = _check_stripe_subscription(_pay_email, _current_user)
             if _new_tier and _new_tier != "trial":
                 st.session_state["sub_tier"]        = _new_tier
@@ -3682,8 +3883,7 @@ if st.session_state.get("current_page") == "upgrade":
 
             _is_paid_subscriber = _sub_tier in ("racer", "pro", "crew_chief")
             if _is_paid_subscriber:
-                if _is_current:
-                    st.caption("← Your current plan")
+                pass  # "← Current plan" badge already shown inside the card HTML above
                 # No subscribe buttons for paid subscribers — manage via Stripe portal
             elif not _tier["price_id"]:
                 st.caption("Configure STRIPE_PRICE env var to enable.")
@@ -3710,11 +3910,32 @@ if st.session_state.get("current_page") == "upgrade":
 
     st.markdown("---")
     if _sub_tier in ("racer", "pro", "crew_chief"):
-        st.info(
-            "To change or cancel your plan, log in to the "
-            "[Stripe customer portal](https://billing.stripe.com/p/login) "
-            "using the email on your account."
-        )
+        if st.button("⚙️ Manage Subscription", key="manage_sub_btn"):
+            _portal_cust_id = None
+            if _sb:
+                try:
+                    _portal_cred = _sb.table("credentials").select("stripe_customer_id") \
+                                       .eq("username", _current_user).execute().data
+                    if _portal_cred:
+                        _portal_cust_id = _portal_cred[0].get("stripe_customer_id") or None
+                except Exception:
+                    pass
+            if not _portal_cust_id:
+                st.error("No Stripe customer record found for your account. Contact support.")
+            else:
+                try:
+                    _portal_return = _get_secret("APP_BASE_URL", "http://127.0.0.1:8501").rstrip("/") + "/?p=upgrade"
+                    _portal_session = stripe.billing_portal.Session.create(
+                        customer=_portal_cust_id,
+                        return_url=_portal_return,
+                    )
+                    st.markdown(
+                        f'<meta http-equiv="refresh" content="0; url={_portal_session.url}">',
+                        unsafe_allow_html=True,
+                    )
+                    st.info("Redirecting to Stripe customer portal…")
+                except Exception as _portal_e:
+                    st.error(f"Could not open portal: {_portal_e}")
     st.caption("All plans billed monthly. Cancel anytime. Secure payments via Stripe.")
 
     if st.button("← Back to Run Analysis", key="upgrade_back_btn"):
@@ -3771,12 +3992,24 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
     _form_csv_col, _form_slip_col = st.columns(2)
     with _form_csv_col:
         st.markdown("**📂 Run Data CSV**")
-        _form_csv_file = st.file_uploader(
-            "Run Data CSV", type=["csv"],
-            help="Export from RacePak DataLink or V-Net",
-            label_visibility="collapsed",
-            key=f"create_csv_{st.session_state['upload_gen']}",
-        )
+        if _has_feature("csv_upload"):
+            _form_csv_file = st.file_uploader(
+                "Run Data CSV", type=["csv"],
+                help="Export from RacePak DataLink or V-Net",
+                label_visibility="collapsed",
+                key=f"create_csv_{st.session_state['upload_gen']}",
+            )
+        else:
+            _form_csv_file = None
+            st.info("📊 CSV upload available on Pro and above.")
+            if st.button("⬆️ Upgrade to Pro", key="csv_gate_upgrade_btn"):
+                _sv = st.query_params.get("session", "")
+                st.query_params.clear()
+                if _sv:
+                    st.query_params["session"] = _sv
+                st.query_params["p"] = "upgrade"
+                st.session_state["current_page"] = "upgrade"
+                st.rerun()
     with _form_slip_col:
         st.markdown("**🎫 Timeslip Photo**")
         _form_slip_file = st.file_uploader(
@@ -4678,6 +4911,17 @@ st.markdown("---")
 
 # ── AI Virtual Tuner ──────────────────────────────────────────────────────────
 st.markdown("## 🤖 AI Virtual Tuner")
+if not _has_feature("ai_tuner"):
+    st.info("🤖 AI Virtual Tuner available on Pro and above.")
+    if st.button("⬆️ Upgrade to Pro", key="ai_tuner_upgrade_btn"):
+        _sv = st.query_params.get("session", "")
+        st.query_params.clear()
+        if _sv:
+            st.query_params["session"] = _sv
+        st.query_params["p"] = "upgrade"
+        st.session_state["current_page"] = "upgrade"
+        st.rerun()
+    st.stop()
 
 def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list,
                       all_saved_runs: list, car_cfg: dict) -> str:
@@ -5484,7 +5728,7 @@ elif _slip_bytes is None:
 if not _csv_available:
     st.stop()
 
-if not _charts_granted:
+if not _has_feature("channel_charts"):
     st.markdown("---")
     st.markdown(
         """<div style="text-align:center;padding:32px 20px;border:1px solid #2a0000;
