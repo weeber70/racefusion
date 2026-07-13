@@ -14,13 +14,25 @@ import base64
 import re
 import requests
 from pathlib import Path
+import stripe
 from dotenv import load_dotenv
 from pathlib import Path as _Path
-load_dotenv(_Path(__file__).parent / ".env")  # loads ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY from .env
+load_dotenv()                                  # picks up .env in cwd (Streamlit Cloud / local)
+load_dotenv(_Path(__file__).parent / ".env")  # also try next to app.py for local dev
 try:
     from supabase import create_client as _sb_create_client
 except ImportError:
     _sb_create_client = None  # type: ignore
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Read a secret from env vars first, then st.secrets (if available)."""
+    val = os.getenv(key, "")
+    if val:
+        return val
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -385,9 +397,31 @@ button[kind="primary"]:hover { background-color: #ee2222 !important; }
 APP_DIR = Path(__file__).parent
 
 # ── Supabase client ───────────────────────────────────────────────────────────
-_SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-_SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+_SUPABASE_URL = _get_secret("SUPABASE_URL")
+_SUPABASE_KEY = _get_secret("SUPABASE_SERVICE_KEY")
+if _sb_create_client and (not _SUPABASE_URL or not _SUPABASE_KEY):
+    st.error(
+        "❌ Supabase credentials missing. "
+        "Check that SUPABASE_URL and SUPABASE_SERVICE_KEY are set in your secrets configuration."
+    )
+    st.stop()
 _sb = _sb_create_client(_SUPABASE_URL, _SUPABASE_KEY) if (_sb_create_client and _SUPABASE_URL and _SUPABASE_KEY) else None
+
+# ── Stripe ────────────────────────────────────────────────────────────────────
+_stripe_mod = stripe
+stripe.api_key = _get_secret("STRIPE_SECRET_KEY")
+
+_STRIPE_PRICE_RACER      = _get_secret("STRIPE_PRICE_RACER")
+_STRIPE_PRICE_PRO        = _get_secret("STRIPE_PRICE_PRO")
+_STRIPE_PRICE_CREW_CHIEF = _get_secret("STRIPE_PRICE_CREW_CHIEF")
+_STRIPE_PUB_KEY          = _get_secret("STRIPE_PUBLISHABLE_KEY")
+_STRIPE_TIER_MAP: dict[str, str] = {
+    _STRIPE_PRICE_RACER:      "racer",
+    _STRIPE_PRICE_PRO:        "pro",
+    _STRIPE_PRICE_CREW_CHIEF: "crew_chief",
+}
+# Remove empty-string key so missing env vars don't match every price_id
+_STRIPE_TIER_MAP = {k: v for k, v in _STRIPE_TIER_MAP.items() if k}
 
 # ── App-wide constants ────────────────────────────────────────────────────────
 _ADMIN_USER = "weeber70"
@@ -517,6 +551,89 @@ def _check_user_exists(username: str) -> bool:
     except Exception:
         return False
 
+# ── Subscription helpers ──────────────────────────────────────────────────────
+def _get_user_subscription(username: str) -> dict:
+    """Read subscription_tier, trial_start_date, stripe_customer_id from credentials."""
+    if not _sb: return {}
+    try:
+        rows = _sb.table("credentials") \
+                  .select("subscription_tier,trial_start_date,stripe_customer_id") \
+                  .eq("username", username).execute().data
+        return rows[0] if rows else {}
+    except Exception as _e:
+        print(f"[RF-SUB] _get_user_subscription failed: {_e}", file=_sys_rf.stderr, flush=True)
+        return {}
+
+def _get_tier_from_price_id(price_id: str) -> str:
+    return _STRIPE_TIER_MAP.get(price_id, "racer")
+
+def _check_stripe_subscription(email: str, username: str) -> str | None:
+    """
+    Poll Stripe for an active subscription for this email.
+    Returns tier name ('racer'|'pro'|'crew_chief') if active, else None.
+    Side-effects: updates credentials table with stripe_customer_id and tier.
+    """
+    if not _stripe_mod or not _stripe_mod.api_key:
+        return None
+    if not email:
+        return None
+    try:
+        customers = _stripe_mod.Customer.list(email=email, limit=1)
+        if not customers.data:
+            return None
+        cust = customers.data[0]
+        subs = _stripe_mod.Subscription.list(customer=cust.id, status="active", limit=1)
+        if not subs.data:
+            return None
+        price_id = subs.data[0].items.data[0].price.id
+        tier = _get_tier_from_price_id(price_id)
+        if _sb:
+            try:
+                _sb.table("credentials").update({
+                    "stripe_customer_id": cust.id,
+                    "subscription_tier":  tier,
+                }).eq("username", username).execute()
+            except Exception:
+                pass
+        return tier
+    except Exception as _e:
+        print(f"[RF-STRIPE] subscription check failed: {_e}", file=_sys_rf.stderr, flush=True)
+        return None
+
+def _is_trial_active(trial_start_date) -> bool:
+    """Return True if the user is still within their 30-day trial."""
+    if not trial_start_date:
+        return True  # no date recorded → just registered, treat as active
+    try:
+        if isinstance(trial_start_date, str):
+            ts = _dt.fromisoformat(trial_start_date.replace("Z", "+00:00"))
+        else:
+            ts = trial_start_date
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        return (_dt.now(_tz.utc) - ts).days <= 30
+    except Exception:
+        return True  # parse failure → be permissive
+
+def _create_stripe_checkout(price_id: str, session_token: str) -> str | None:
+    """Create a Stripe Checkout Session and return the redirect URL."""
+    if not _stripe_mod or not price_id:
+        return None
+    try:
+        base = _get_secret("APP_BASE_URL", "http://localhost:8501").rstrip("/")
+        checkout = _stripe_mod.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode="subscription",
+            success_url=f"{base}/?session={session_token}&p=upgrade&success=true&cs={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base}/?p=upgrade",
+        )
+        return checkout.url
+    except Exception as _e:
+        print(f"[RF-STRIPE] checkout session creation failed: {_e}", file=_sys_rf.stderr, flush=True)
+        st.session_state["_stripe_last_error"] = str(_e)
+        return None
+
 def _verify_login(username: str, password: str) -> bool:
     if not _sb: return False
     try:
@@ -530,7 +647,13 @@ def _register_user(username: str, password: str) -> bool:
     if not _sb: return False
     salt, hsh = _hash_password(password)
     try:
-        _sb.table("credentials").insert({"username": username, "salt": salt, "password_hash": hsh}).execute()
+        _sb.table("credentials").insert({
+            "username":         username,
+            "salt":             salt,
+            "password_hash":    hsh,
+            "subscription_tier": "trial",
+            "trial_start_date": _dt.now(_tz.utc).isoformat(),
+        }).execute()
         return True
     except Exception:
         return False
@@ -557,7 +680,7 @@ if st.session_state["rf_user"] is None:
             st.session_state["session_token"] = _sess_param
             # Restore current_page from URL if present
             _p_param = st.query_params.get("p", "")
-            if _p_param in ("dashboard", "predictor", "season"):
+            if _p_param in ("dashboard", "predictor", "season", "upgrade"):
                 st.session_state["current_page"] = _p_param
             print(f"[RF-AUTH] ✅ session restored as {_restored_user!r}  page={_p_param!r}", file=_sys_rf.stderr, flush=True)
         else:
@@ -594,7 +717,7 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
     else:
         st.markdown("## 🏁 RaceFusion")
 
-    st.markdown("<div style='text-align:center;color:#888;margin-bottom:32px;'>RacePak Data Dashboard</div>",
+    st.markdown("<div style='text-align:center;color:#888;margin-bottom:32px;'>Run Data Dashboard</div>",
                 unsafe_allow_html=True)
 
     _auth_tab_login, _auth_tab_reg = st.tabs(["Log In", "Create Account"])
@@ -650,7 +773,7 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
             elif _reg_pass != _reg_pass2:
                 st.error("⚠️ Passwords do not match.")
             elif _check_user_exists(_u):
-                st.error("That username is already taken. Please choose another.")
+                st.error("Username already taken. Please choose a different username.")
             else:
                 if _register_user(_u, _reg_pass):
                     # Save initial config with email
@@ -691,7 +814,7 @@ for _k, _v in {
         # Restore current_page from URL on refresh
         if _k == "current_page":
             _pg_param = st.query_params.get("p", "")
-            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season") else _v
+            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season", "upgrade") else _v
         else:
             st.session_state[_k] = _v
 
@@ -1664,6 +1787,38 @@ def calc_rwhp(weight_lbs: float, et: float | None, mph: float | None) -> dict:
 # ── Load config once, before any sidebar widgets that need it ─────────────────
 cfg = load_config()
 
+# ── Subscription state — resolved once per session ────────────────────────────
+# Clear cached state if returning from Stripe Checkout success
+if "stripe_success" in st.query_params:
+    st.session_state.pop("sub_tier", None)
+    st.query_params.pop("stripe_success", None)
+
+if "sub_tier" not in st.session_state:
+    _sub_rec      = _get_user_subscription(_current_user)
+    _trial_start  = _sub_rec.get("trial_start_date")
+    _stored_tier  = _sub_rec.get("subscription_tier", "trial")
+    # Poll Stripe for fresh status (only if not already on a paid tier)
+    if _stored_tier not in ("racer", "pro", "crew_chief"):
+        _user_email = cfg.get("email", "")
+        _stripe_tier = _check_stripe_subscription(_user_email, _current_user)
+        if _stripe_tier:
+            _stored_tier = _stripe_tier
+    st.session_state["sub_tier"]       = _stored_tier
+    st.session_state["trial_active"]   = _is_trial_active(_trial_start)
+    st.session_state["access_granted"] = (
+        st.session_state["trial_active"]
+        or _stored_tier in ("racer", "pro", "crew_chief")
+    )
+    st.session_state["charts_granted"] = (
+        st.session_state["trial_active"]
+        or _stored_tier in ("pro", "crew_chief")
+    )
+
+_sub_tier       = st.session_state.get("sub_tier", "trial")
+_trial_active   = st.session_state.get("trial_active", True)
+_access_granted = st.session_state.get("access_granted", True)
+_charts_granted = st.session_state.get("charts_granted", True)
+
 # ── Maintenance mode (Supabase-backed) ────────────────────────────────────────
 _maintenance_on = _read_maintenance_mode()
 
@@ -1826,7 +1981,7 @@ if _LOGO_SRC:
 else:
     st.sidebar.title("🏁 RaceFusion")
 
-st.sidebar.caption("RacePak Data Dashboard")
+st.sidebar.caption("Run Data Dashboard")
 
 # ── User badge + logout ───────────────────────────────────────────────────────
 _ub_col1, _ub_col2 = st.sidebar.columns([3, 2])
@@ -1836,6 +1991,9 @@ if _ub_col2.button("Log Out", key="logout_btn"):
     st.query_params.pop("session", None)
     st.query_params.pop("p", None)
     st.session_state["rf_user"] = None
+    # Clear subscription state so next login gets a fresh check
+    for _sub_k in ("sub_tier", "trial_active", "access_granted", "charts_granted"):
+        st.session_state.pop(_sub_k, None)
     st.rerun()
 
 _theme_col1, _theme_col2 = st.sidebar.columns([3, 2])
@@ -1862,6 +2020,12 @@ if _cur_page != "season":
     if st.sidebar.button("📅 Season Summary", use_container_width=True, key="nav_to_season"):
         st.session_state["current_page"] = "season"
         st.query_params["p"] = "season"
+        st.rerun()
+if _cur_page != "upgrade":
+    _upg_label = "⬆️ Upgrade Plan" if not _access_granted else "⬆️ Manage Subscription"
+    if st.sidebar.button(_upg_label, use_container_width=True, key="nav_to_upgrade"):
+        st.session_state["current_page"] = "upgrade"
+        st.query_params["p"] = "upgrade"
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -2157,7 +2321,7 @@ _racepak_controls_slot = st.sidebar.container()
 
 # ── RacePak Data ──────────────────────────────────────────────────────────────
 _rp_hdr_col, _rp_help_col = st.sidebar.columns([5, 1])
-_rp_hdr_col.markdown("### 📂 RacePak Data")
+_rp_hdr_col.markdown("### 📂 Run Data")
 with _rp_help_col:
     if st.button("❓", key="racepak_help_btn", help="How to export from DataLink II"):
         st.session_state["_show_racepak_help"] = not st.session_state.get("_show_racepak_help", False)
@@ -2176,7 +2340,7 @@ if st.session_state.get("_show_racepak_help", False):
    - **Sampling Interval:** 0.02
    - Leave **"Directly Print in ASCII (no preview)"** unchecked
 5. Click OK and save the file
-6. Return to RaceFusion and upload the saved file in the **RacePak Data** section
+6. Return to RaceFusion and upload the saved file in the **Run Data** section
 """)
 
 if _sel_idx_raw == 0:   # "New run…"
@@ -2187,12 +2351,16 @@ elif _active_csv_name and _active_csv_name.endswith(".run"):
     # Timeslip-only run — auto-process CSV as soon as one is selected
     _csv_up_key    = f"_add_csv_up_{_active_csv_name}"
     _csv_saved_key = f"_csv_saved_{_active_csv_name}"
-    _add_csv_file  = st.sidebar.file_uploader(
-        "Add RacePak CSV to this run",
-        type=["csv"],
-        key=_csv_up_key,
-        help="Attach a RacePak CSV to combine with your timeslip data",
-    )
+    if not _access_granted:
+        st.sidebar.caption("🔒 Upgrade to add Run Data CSV")
+        _add_csv_file = None
+    else:
+        _add_csv_file  = st.sidebar.file_uploader(
+            "Add Run Data CSV to this run",
+            type=["csv"],
+            key=_csv_up_key,
+            help="Attach a Run Data CSV to combine with your timeslip data",
+        )
     if _add_csv_file is not None and not st.session_state.get(_csv_saved_key):
         with st.sidebar.spinner("💾 Saving CSV…"):
             save_run_csv(_active_csv_name, _add_csv_file.read())
@@ -2223,7 +2391,7 @@ if st.session_state.get("_show_timeslip_help", False):
 2. Transfer the photo to your computer
 3. Upload the photo in the **Timeslip Scanner** section
 """)
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+api_key = _get_secret("ANTHROPIC_API_KEY")
 if not api_key:
     st.sidebar.warning("⚠️ ANTHROPIC_API_KEY not set in .env — timeslip scanning and AI tuner unavailable.")
 
@@ -2414,6 +2582,130 @@ if st.sidebar.button("Save location"):
 if cfg.get("location_label"):
     st.sidebar.caption(f"📍 {cfg['location_label']}")
 
+# ── Trial-expired banner (shown on every page when access is locked) ──────────
+if not _access_granted:
+    st.markdown(
+        """<div style="background:#7a0000;color:#fff;padding:12px 20px;border-radius:6px;
+        margin-bottom:16px;font-weight:600;font-size:1rem;border:1px solid #cc0000;">
+        🔒 Your 30-day trial has expired — upgrade to continue adding runs.
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+# ── Admin Panel (weeber70 only) — always visible, top of main area ────────────
+if _current_user == "weeber70" and _sb:
+    with st.expander("🔒 Admin Panel", expanded=False):
+
+        def _time_ago(ts_str: str) -> str:
+            if not ts_str:
+                return "never"
+            try:
+                from datetime import datetime, timezone
+                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
+                if _s < 60:    return f"{_s}s ago"
+                if _s < 3600:  return f"{_s // 60}m ago"
+                if _s < 86400: return f"{_s // 3600}h ago"
+                return f"{_s // 86400}d ago"
+            except Exception:
+                return ts_str
+
+        # ── Maintenance mode toggle ───────────────────────────────────────────
+        _maint_toggle = st.toggle(
+            "🚧 Maintenance Mode",
+            value=_maintenance_on,
+            key="admin_maint_toggle",
+            help="When ON, all users except weeber70 see the maintenance screen.",
+        )
+        if _maint_toggle != _maintenance_on:
+            _write_maintenance_mode(_maint_toggle)
+            st.rerun()
+
+        st.markdown("---")
+
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            _ten_ago      = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
+            _active_count = len(_active_rows)
+
+            _cred_res    = _sb.table("credentials").select("username", count="exact").execute()
+            _total_users = _cred_res.count or len(_cred_res.data)
+
+            _runs_res    = _sb.table("runs").select("username", count="exact").execute()
+            _total_runs  = _runs_res.count or len(_runs_res.data)
+
+            try:
+                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
+                _total_slip = _slip_res.count or 0
+            except Exception:
+                _total_slip = "—"
+
+            _a1, _a2 = st.columns(2)
+            _a1.metric("Active now",        _active_count)
+            _a2.metric("Accounts",          _total_users)
+            _b1, _b2 = st.columns(2)
+            _b1.metric("Runs logged",       _total_runs)
+            _b2.metric("Timeslips scanned", _total_slip)
+
+            st.markdown("---")
+
+            _all_creds    = _sb.table("credentials").select("username").execute().data
+            _all_sessions = {r["username"]: r["last_seen"]
+                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
+            _run_rows     = _runs_res.data or _sb.table("runs").select("username").execute().data
+            _run_counts   = {}
+            for _rr in _run_rows:
+                _u = _rr.get("username", "")
+                _run_counts[_u] = _run_counts.get(_u, 0) + 1
+
+            _all_emails: dict[str, str] = {}
+            try:
+                _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
+                for _cr in _cfg_rows:
+                    _cfg_blob = _cr.get("config") or {}
+                    if isinstance(_cfg_blob, str):
+                        try: _cfg_blob = json.loads(_cfg_blob)
+                        except Exception: _cfg_blob = {}
+                    _em = _cfg_blob.get("email", "")
+                    if _em:
+                        _all_emails[_cr["username"]] = _em
+            except Exception:
+                pass
+
+            _rows_html = ""
+            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
+                _un  = _cu["username"]
+                _ls  = _time_ago(_all_sessions.get(_un, ""))
+                _rc  = _run_counts.get(_un, 0)
+                _em  = _all_emails.get(_un, "—")
+                _bold = "font-weight:700;" if _un == "weeber70" else ""
+                _rows_html += (
+                    f'<tr>'
+                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
+                    f'<td style="color:#777;padding:3px 6px;font-size:0.78rem;">{_em}</td>'
+                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
+                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
+                    f'</tr>'
+                )
+
+            st.markdown(f"""
+<div style="font-size:0.82rem;font-family:monospace;overflow-x:auto;">
+<table style="width:100%;border-collapse:collapse;">
+<thead><tr>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Email</th>
+  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
+  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
+</tr></thead>
+<tbody>{_rows_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+
+        except Exception as _admin_err:
+            st.warning(f"Admin data unavailable: {_admin_err}")
+
 # ── Race Day Predictor page ───────────────────────────────────────────────────
 if st.session_state.get("current_page") == "predictor":
     import urllib.parse as _rdp_urlparse
@@ -2424,6 +2716,21 @@ if st.session_state.get("current_page") == "predictor":
         unsafe_allow_html=True,
     )
     st.markdown("---")
+
+    if not _access_granted:
+        st.markdown(
+            """<div style="text-align:center;padding:40px 20px;">
+            <div style="font-size:2.5rem;margin-bottom:12px;">🔒</div>
+            <h3 style="color:#cc1111;">Upgrade to continue</h3>
+            <p style="color:#888;">Race Day Predictor requires an active subscription.</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        if st.button("⬆️ View Upgrade Options", key="rdp_upgrade_btn", type="primary"):
+            st.session_state["current_page"] = "upgrade"
+            st.query_params["p"] = "upgrade"
+            st.rerun()
+        st.stop()
 
     # ── Current Conditions ────────────────────────────────────────────────────
     st.markdown("## 🌤️ Current Conditions")
@@ -3206,12 +3513,180 @@ if st.session_state.get("current_page") == "season":
 
     st.stop()  # Don't render the dashboard on the season page
 
+# ── Upgrade page ──────────────────────────────────────────────────────────────
+if st.session_state.get("current_page") == "upgrade":
+    _sess_tok = st.session_state.get("session_token", "")
+
+    st.markdown("# ⬆️ Upgrade RaceFusion")
+    if _trial_active:
+        _upg_sub_rec   = _get_user_subscription(_current_user)
+        _upg_ts_str    = _upg_sub_rec.get("trial_start_date") or ""
+        _upg_ts        = (
+            _dt.fromisoformat(_upg_ts_str.replace("Z", "+00:00")).replace(tzinfo=_tz.utc)
+            if _upg_ts_str else _dt.now(_tz.utc)
+        )
+        _days_left = max(0, 30 - (_dt.now(_tz.utc) - _upg_ts).days)
+        st.markdown(
+            f"<p style='color:#22aa55;'>✅ Your trial is active — <strong>{_days_left} day(s)</strong> remaining.</p>",
+            unsafe_allow_html=True,
+        )
+    elif _sub_tier in ("racer", "pro", "crew_chief"):
+        st.markdown(
+            f"<p style='color:#22aa55;'>✅ Active subscription: <strong>{_sub_tier.replace('_', ' ').title()}</strong></p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<p style='color:#cc1111;font-weight:600;'>⚠️ Your trial has expired. Choose a plan to continue.</p>",
+            unsafe_allow_html=True,
+        )
+
+    if stripe.api_key and stripe.api_key.startswith("sk_test_"):
+        st.info(
+            "🧪 **Beta Testing Mode** — No real charges will be made. "
+            "Use test card **4242 4242 4242 4242**, any future expiry, any CVC, any ZIP."
+        )
+
+    st.markdown("---")
+
+    _tier_data = [
+        {
+            "key":      "racer",
+            "label":    "🏎️ Racer",
+            "price":    "$9.99/month",
+            "price_id": _STRIPE_PRICE_RACER,
+            "features": [
+                ("✅", "Unlimited timeslips"),
+                ("✅", "ET Predictor"),
+                ("✅", "Weather / DA tracking"),
+                ("✅", "Season Summary"),
+                ("✅", "Race Day Predictor"),
+            ],
+        },
+        {
+            "key":      "pro",
+            "label":    "🏆 Pro",
+            "price":    "$19.99/month",
+            "price_id": _STRIPE_PRICE_PRO,
+            "features": [
+                ("✅", "Everything in Racer"),
+                ("✅", "1 car"),
+                ("✅", "Interactive Channel Charts"),
+                ("✅", "Channel Peaks & alerts"),
+                ("✅", "Custom channel overlays"),
+                ("✅", "AI Virtual Tuner"),
+            ],
+        },
+        {
+            "key":      "crew_chief",
+            "label":    "🧠 Crew Chief",
+            "price":    "$34.99/month",
+            "price_id": _STRIPE_PRICE_CREW_CHIEF,
+            "features": [
+                ("✅", "Everything in Pro"),
+                ("✅", "AI Virtual Tuner"),
+                ("🔜", "Unlimited cars (coming soon)"),
+                ("🔜", "Team logins — up to 3 users (coming soon)"),
+            ],
+        },
+    ]
+
+    _upg_cols = st.columns(3)
+    for _tier, _col in zip(_tier_data, _upg_cols):
+        with _col:
+            _is_current   = _sub_tier == _tier["key"]
+            _border_color = "#cc1111" if _is_current else "#2a2a3a"
+            _bg           = "#140000" if _is_current else "#0a0a0a"
+
+            _li_parts = []
+            for _icon, _text in _tier["features"]:
+                _color = "#e8e8e8" if _icon == "✅" else "#888"
+                _li_parts.append(
+                    f'<li style="margin:5px 0;color:{_color};">{_icon} {_text}</li>'
+                )
+            _features_html = "".join(_li_parts)
+
+            _current_badge = (
+                '<div style="color:#22aa55;font-weight:600;font-size:0.85rem;">← Current plan</div>'
+                if _is_current else ""
+            )
+
+            # min-height + flexbox keeps all cards the same height regardless of feature count.
+            # flex:1 on the <ul> pushes the badge/empty space to fill, aligning buttons below.
+            _card_html = (
+                f'<div style="border:2px solid {_border_color};border-radius:10px;'
+                f'padding:20px 18px;background:{_bg};font-family:monospace;'
+                f'min-height:320px;display:flex;flex-direction:column;">'
+                f'<div style="font-size:1.3rem;font-weight:700;color:#fff;margin-bottom:4px;">{_tier["label"]}</div>'
+                f'<div style="font-size:1.1rem;color:#cc1111;font-weight:700;margin-bottom:12px;">{_tier["price"]}</div>'
+                f'<ul style="list-style:none;padding:0;margin:0;flex:1;">{_features_html}</ul>'
+                f'{_current_badge}'
+                f'</div>'
+            )
+            st.markdown(_card_html, unsafe_allow_html=True)
+
+            if not _is_current and _tier["price_id"]:
+                if st.button(
+                    f"Subscribe — {_tier['price']}",
+                    key=f"sub_btn_{_tier['key']}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _checkout_url = _create_stripe_checkout(_tier["price_id"], _sess_tok)
+                    if _checkout_url:
+                        st.markdown(
+                            f'<meta http-equiv="refresh" content="0;url={_checkout_url}">',
+                            unsafe_allow_html=True,
+                        )
+                        st.info("Redirecting to Stripe checkout…")
+                    else:
+                        _err = st.session_state.get("_stripe_last_error", "No exception captured — check server logs.")
+                        st.error(f"Stripe error: {_err}")
+            elif not _tier["price_id"]:
+                st.caption("Configure STRIPE_PRICE env var to enable.")
+
+    st.markdown("---")
+    st.caption("All plans billed monthly. Cancel anytime. Secure payments via Stripe.")
+
+    if st.button("← Back to Run Analysis", key="upgrade_back_btn"):
+        st.session_state["current_page"] = "dashboard"
+        st.query_params["p"] = "dashboard"
+        st.rerun()
+
+    st.stop()  # Don't render the dashboard on the upgrade page
+
 # ── Main area ─────────────────────────────────────────────────────────────────
 
 print(f'[RF-DEBUG] MAIN CHECK: active_run_id={st.session_state.get("active_run_id")!r}, _sel_idx_raw={_sel_idx_raw}, _user_changed_run={_user_changed_run}, _reset_selector={st.session_state.get("_reset_selector")!r}', file=sys.stderr, flush=True)
 if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
     # ── Create New Run form ───────────────────────────────────────────────────
     _fg = "#888" if _dark_mode else "#666"
+
+    # Gate: trial expired and no active subscription
+    if not _access_granted:
+        if _LOGO_SRC:
+            st.markdown(
+                f'<div style="text-align:center;padding:32px 20px 8px;">'
+                f'<img src="{_LOGO_SRC}" style="max-width:600px;width:80%;"></div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            """<div style="text-align:center;padding:24px 20px 12px;">
+            <div style="font-size:3rem;margin-bottom:8px;">🔒</div>
+            <h3 style="color:#cc1111;">Trial Expired</h3>
+            <p style="color:#888;max-width:440px;margin:0 auto 20px;">
+            Your 30-day free trial has ended. Upgrade to keep adding runs,
+            uploading CSVs, and using all RaceFusion features.
+            </p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        if st.button("⬆️ View Upgrade Options", key="new_run_upgrade_btn", type="primary"):
+            st.session_state["current_page"] = "upgrade"
+            st.query_params["p"] = "upgrade"
+            st.rerun()
+        st.stop()
+
     if _LOGO_SRC:
         st.markdown(
             f'<div style="text-align:center;padding:32px 20px 8px;">'
@@ -3226,9 +3701,9 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
 
     _form_csv_col, _form_slip_col = st.columns(2)
     with _form_csv_col:
-        st.markdown("**📂 RacePak CSV**")
+        st.markdown("**📂 Run Data CSV**")
         _form_csv_file = st.file_uploader(
-            "RacePak CSV", type=["csv"],
+            "Run Data CSV", type=["csv"],
             help="Export from RacePak DataLink or V-Net",
             label_visibility="collapsed",
             key=f"create_csv_{st.session_state['upload_gen']}",
@@ -3270,7 +3745,7 @@ if st.session_state.get("active_run_id") is None and _sel_idx_raw == 0:
 
     if _form_submitted:
         if _form_csv_file is None and _form_slip_file is None:
-            st.error("Upload at least a RacePak CSV or a timeslip photo.")
+            st.error("Upload at least a Run Data CSV or a timeslip photo.")
         else:
             # ── Determine run filename ────────────────────────────────────────
             if _form_csv_file is not None:
@@ -3483,7 +3958,7 @@ else:
 
 # ── Sidebar: RacePak Controls (rendered into slot between Run Manager and RacePak Data) ──
 with _racepak_controls_slot:
-    st.markdown("### 📊 RacePak Controls")
+    st.markdown("### 📊 Run Data Controls")
     if _csv_available:
         with st.expander("Graph Controls", expanded=False):
             # 1. Smoothing
@@ -3622,124 +4097,6 @@ with _racepak_controls_slot:
             st.caption("No rules set yet.")
 
     st.markdown("---")
-
-# ── Admin Panel (weeber70 only) ───────────────────────────────────────────────
-_admin_user = st.session_state.get("rf_user", "")
-print(f"[RF-DEBUG] admin check: rf_user={_admin_user!r}  is_admin={_admin_user == 'weeber70'}", file=_sys_rf.stderr, flush=True)
-if _admin_user == "weeber70" and _sb:
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("🔒 Admin Panel", expanded=False):
-
-        def _time_ago(ts_str: str) -> str:
-            if not ts_str:
-                return "never"
-            try:
-                from datetime import datetime, timezone
-                _ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                _s  = int((datetime.now(timezone.utc) - _ts).total_seconds())
-                if _s < 60:    return f"{_s}s ago"
-                if _s < 3600:  return f"{_s // 60}m ago"
-                if _s < 86400: return f"{_s // 3600}h ago"
-                return f"{_s // 86400}d ago"
-            except Exception:
-                return ts_str
-
-        # ── Maintenance mode toggle ───────────────────────────────────────────
-        _maint_toggle = st.toggle(
-            "🚧 Maintenance Mode",
-            value=_maintenance_on,
-            key="admin_maint_toggle",
-            help="When ON, all users except weeber70 see the maintenance screen.",
-        )
-        if _maint_toggle != _maintenance_on:
-            _write_maintenance_mode(_maint_toggle)
-            st.rerun()
-
-        st.markdown("---")
-
-        try:
-            from datetime import datetime, timezone, timedelta
-
-            _ten_ago      = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-            _active_rows  = _sb.table("sessions").select("username").gte("last_seen", _ten_ago).execute().data
-            _active_count = len(_active_rows)
-
-            _cred_res    = _sb.table("credentials").select("username", count="exact").execute()
-            _total_users = _cred_res.count or len(_cred_res.data)
-
-            _runs_res    = _sb.table("runs").select("username", count="exact").execute()
-            _total_runs  = _runs_res.count or len(_runs_res.data)
-
-            try:
-                _slip_res   = _sb.table("runs").select("id", count="exact").not_.is_("run_data->>timeslip_storage_key", "null").execute()
-                _total_slip = _slip_res.count or 0
-            except Exception:
-                _total_slip = "—"
-
-            _a1, _a2 = st.columns(2)
-            _a1.metric("Active now",        _active_count)
-            _a2.metric("Accounts",          _total_users)
-            _b1, _b2 = st.columns(2)
-            _b1.metric("Runs logged",       _total_runs)
-            _b2.metric("Timeslips scanned", _total_slip)
-
-            st.markdown("---")
-
-            _all_creds    = _sb.table("credentials").select("username").execute().data
-            _all_sessions = {r["username"]: r["last_seen"]
-                             for r in _sb.table("sessions").select("username,last_seen").execute().data}
-            _run_rows     = _runs_res.data or _sb.table("runs").select("username").execute().data
-            _run_counts   = {}
-            for _rr in _run_rows:
-                _u = _rr.get("username", "")
-                _run_counts[_u] = _run_counts.get(_u, 0) + 1
-
-            # Fetch emails from user_configs
-            _all_emails: dict[str, str] = {}
-            try:
-                _cfg_rows = _sb.table("user_configs").select("username,config").execute().data
-                for _cr in _cfg_rows:
-                    _cfg_blob = _cr.get("config") or {}
-                    if isinstance(_cfg_blob, str):
-                        try: _cfg_blob = json.loads(_cfg_blob)
-                        except Exception: _cfg_blob = {}
-                    _em = _cfg_blob.get("email", "")
-                    if _em:
-                        _all_emails[_cr["username"]] = _em
-            except Exception:
-                pass
-
-            _rows_html = ""
-            for _cu in sorted(_all_creds, key=lambda x: x["username"]):
-                _un  = _cu["username"]
-                _ls  = _time_ago(_all_sessions.get(_un, ""))
-                _rc  = _run_counts.get(_un, 0)
-                _em  = _all_emails.get(_un, "—")
-                _bold = "font-weight:700;" if _un == "weeber70" else ""
-                _rows_html += (
-                    f'<tr>'
-                    f'<td style="color:#ccc;{_bold}padding:3px 6px 3px 0;">{_un}</td>'
-                    f'<td style="color:#777;padding:3px 6px;font-size:0.78rem;">{_em}</td>'
-                    f'<td style="color:#888;padding:3px 6px;">{_ls}</td>'
-                    f'<td style="color:#cc1111;text-align:right;padding:3px 0;">{_rc}</td>'
-                    f'</tr>'
-                )
-
-            st.markdown(f"""
-<div style="font-size:0.82rem;font-family:monospace;overflow-x:auto;">
-<table style="width:100%;border-collapse:collapse;">
-<thead><tr>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px 0;border-bottom:1px solid #2a2a3a;">User</th>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Email</th>
-  <th style="color:#666;text-align:left;padding:2px 6px 4px;border-bottom:1px solid #2a2a3a;">Last seen</th>
-  <th style="color:#666;text-align:right;padding:2px 0 4px;border-bottom:1px solid #2a2a3a;">Runs</th>
-</tr></thead>
-<tbody>{_rows_html}</tbody>
-</table>
-</div>""", unsafe_allow_html=True)
-
-        except Exception as _admin_err:
-            st.warning(f"Admin data unavailable: {_admin_err}")
 
 # ── Load or init run record ───────────────────────────────────────────────────
 run = load_run(csv_name)
@@ -4048,7 +4405,7 @@ elif df is not None and "Clock 1320ft" in df.columns:
     _et_col = df["Clock 1320ft"][df["Clock 1320ft"] > 0]
     _et_val = _et_col.max() if not _et_col.empty else None
     _et_str = f"{_et_val:.3f} s" if _et_val else "—"
-    _et_src  = "RacePak"
+    _et_src  = "Run Data"
 else:
     _et_val, _et_str, _et_src = None, "—", ""
 
@@ -4065,13 +4422,13 @@ if _slip_mph:
 elif df is not None and "G-Meter MPH" in df.columns:
     _mph_val = df["G-Meter MPH"].max()
     _mph_str = f"{_mph_val:.1f} mph"
-    _mph_src  = "RacePak"
+    _mph_src  = "Run Data"
 else:
     _mph_val, _mph_str, _mph_src = None, "—", ""
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 if df is not None and "Engine RPM" in df.columns:
-    c1.metric("Peak Engine RPM", f"{df['Engine RPM'].max():,.0f}", help="From RacePak data")
+    c1.metric("Peak Engine RPM", f"{df['Engine RPM'].max():,.0f}", help="From Run Data")
 c2.metric("ET", _et_str, help=f"Source: {_et_src}" if _et_src else None)
 c3.metric("Trap Speed", _mph_str, help=f"Source: {_mph_src}" if _mph_src else None)
 if _rwhp.get("from_mph"):
@@ -5058,6 +5415,23 @@ elif _slip_bytes is None:
 if not _csv_available:
     st.stop()
 
+if not _charts_granted:
+    st.markdown("---")
+    st.markdown(
+        """<div style="text-align:center;padding:32px 20px;border:1px solid #2a0000;
+        border-radius:10px;background:#0a0a0a;">
+        <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
+        <h3 style="color:#cc1111;">Channel Charts — Pro Feature</h3>
+        <p style="color:#888;">Upgrade to Pro or Crew Chief to unlock interactive channel charts.</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if st.button("⬆️ Upgrade to Pro", key="charts_upgrade_btn", type="primary"):
+        st.session_state["current_page"] = "upgrade"
+        st.query_params["p"] = "upgrade"
+        st.rerun()
+    st.stop()
+
 # EGT channels are shown in the dedicated EGT panel above — skip here
 _egt_group_name = "🌡️ EGT (Exhaust Temps)"
 _egt_chs_set = set(_cyl_channels) | ({_avg_egt_ch} if _avg_egt_ch else set())
@@ -5346,7 +5720,7 @@ for _col, _hdr, _val in zip(_rr_cols, _rr_headers, _rr_vals):
 
 # RacePak peak row
 st.divider()
-st.markdown("##### 📡 RacePak Peaks")
+st.markdown("##### 📡 Channel Peaks")
 _rp_items = []
 for _rp_ch, _rp_lbl in [
     ("Engine RPM", "Peak RPM"), ("Boost Press", "Peak Boost (psi)"),
