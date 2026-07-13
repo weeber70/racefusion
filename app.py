@@ -615,19 +615,41 @@ def _is_trial_active(trial_start_date) -> bool:
     except Exception:
         return True  # parse failure → be permissive
 
-def _create_stripe_checkout(price_id: str, session_token: str) -> str | None:
-    """Create a Stripe Checkout Session and return the redirect URL."""
+def _create_stripe_checkout(price_id: str, session_token: str,
+                             username: str = "", email: str = "") -> str | None:
+    """Create a Stripe Checkout Session and return the redirect URL.
+
+    Reuses an existing Stripe customer when stripe_customer_id is stored in
+    credentials; otherwise pre-fills the email for a new customer.
+    """
     if not _stripe_mod or not price_id:
         return None
     try:
+        # Look up existing Stripe customer ID so we don't create duplicates.
+        _existing_cust_id: str | None = None
+        if _sb and username:
+            try:
+                _cred_rows = _sb.table("credentials").select("stripe_customer_id") \
+                               .eq("username", username).execute().data
+                if _cred_rows:
+                    _existing_cust_id = _cred_rows[0].get("stripe_customer_id") or None
+            except Exception:
+                pass
+
         base = _get_secret("APP_BASE_URL", "http://localhost:8501").rstrip("/")
-        checkout = _stripe_mod.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": 1}],
-            mode="subscription",
-            success_url=f"{base}/?session={session_token}&p=upgrade&success=true&cs={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{base}/?p=upgrade",
-        )
+        _sess_params: dict = {
+            "payment_method_types": ["card"],
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "mode": "subscription",
+            "success_url": f"{base}/?session={session_token}&p=upgrade&success=true&cs_id={{CHECKOUT_SESSION_ID}}",
+            "cancel_url":  f"{base}/?p=upgrade",
+        }
+        if _existing_cust_id:
+            _sess_params["customer"] = _existing_cust_id
+        elif email:
+            _sess_params["customer_email"] = email
+
+        checkout = _stripe_mod.checkout.Session.create(**_sess_params)
         return checkout.url
     except Exception as _e:
         print(f"[RF-STRIPE] checkout session creation failed: {_e}", file=_sys_rf.stderr, flush=True)
@@ -635,13 +657,6 @@ def _create_stripe_checkout(price_id: str, session_token: str) -> str | None:
         return None
 
 def _verify_login(username: str, password: str) -> bool:
-    st.write(f"DEBUG: attempting login for '{username}'")
-    st.write(f"DEBUG: supabase client type = {type(_sb)}")
-    try:
-        _dbg_result = _sb.table("credentials").select("username, password_hash").eq("username", username).execute()
-        st.write(f"DEBUG: query result = {_dbg_result.data}")
-    except Exception as _dbg_e:
-        st.write(f"DEBUG: query FAILED with error: {str(_dbg_e)}")
     if not _sb: return False
     try:
         rows = _sb.table("credentials").select("salt,password_hash").eq("username", username).execute().data
@@ -3525,6 +3540,39 @@ if st.session_state.get("current_page") == "upgrade":
     _sess_tok = st.session_state.get("session_token", "")
 
     st.markdown("# ⬆️ Upgrade RaceFusion")
+
+    # ── Post-payment success handler ──────────────────────────────────────────
+    if st.query_params.get("success") == "true":
+        _cs_id = st.query_params.get("cs_id", "")
+        st.query_params.clear()          # always clear — prevents any re-trigger
+        if not _cs_id or not _cs_id.startswith("cs_"):
+            # Stale bookmark or manually crafted URL — ignore silently.
+            pass
+        else:
+            # Valid Stripe checkout session ID — poll Stripe to confirm.
+            _pay_email = cfg.get("email", "")
+            _new_tier  = _check_stripe_subscription(_pay_email, _current_user)
+            if _new_tier and _new_tier != "trial":
+                st.session_state["sub_tier"]        = _new_tier
+                st.session_state["trial_active"]    = False
+                st.session_state["access_granted"]  = True
+                st.session_state["charts_granted"]  = _new_tier in ("pro", "crew_chief")
+                _sub_tier = _new_tier
+                st.session_state["_stripe_flash"] = "success"
+            else:
+                st.session_state["_stripe_flash"] = "pending"
+
+    # Show the flash exactly once (session state survives the query_params.clear() rerun).
+    _stripe_flash = st.session_state.pop("_stripe_flash", None)
+    if _stripe_flash == "success":
+        st.success("🎉 Subscription activated! Welcome to RaceFusion.")
+        st.balloons()
+    elif _stripe_flash == "pending":
+        st.warning(
+            "Payment received but subscription not yet confirmed by Stripe. "
+            "Please refresh in a moment."
+        )
+
     if _trial_active:
         _upg_sub_rec   = _get_user_subscription(_current_user)
         _upg_ts_str    = _upg_sub_rec.get("trial_start_date") or ""
@@ -3538,10 +3586,10 @@ if st.session_state.get("current_page") == "upgrade":
             unsafe_allow_html=True,
         )
     elif _sub_tier in ("racer", "pro", "crew_chief"):
-        st.markdown(
-            f"<p style='color:#22aa55;'>✅ Active subscription: <strong>{_sub_tier.replace('_', ' ').title()}</strong></p>",
-            unsafe_allow_html=True,
-        )
+        _tier_prices = {"racer": "9.99", "pro": "19.99", "crew_chief": "34.99"}
+        _tier_label  = _sub_tier.replace("_", " ").title()
+        _tier_price  = _tier_prices.get(_sub_tier, "?")
+        st.success(f"✅ You're subscribed to **{_tier_label}** — ${_tier_price}/month")
     else:
         st.markdown(
             "<p style='color:#cc1111;font-weight:600;'>⚠️ Your trial has expired. Choose a plan to continue.</p>",
@@ -3632,14 +3680,24 @@ if st.session_state.get("current_page") == "upgrade":
             )
             st.markdown(_card_html, unsafe_allow_html=True)
 
-            if not _is_current and _tier["price_id"]:
+            _is_paid_subscriber = _sub_tier in ("racer", "pro", "crew_chief")
+            if _is_paid_subscriber:
+                if _is_current:
+                    st.caption("← Your current plan")
+                # No subscribe buttons for paid subscribers — manage via Stripe portal
+            elif not _tier["price_id"]:
+                st.caption("Configure STRIPE_PRICE env var to enable.")
+            else:
                 if st.button(
                     f"Subscribe — {_tier['price']}",
                     key=f"sub_btn_{_tier['key']}",
                     type="primary",
                     use_container_width=True,
                 ):
-                    _checkout_url = _create_stripe_checkout(_tier["price_id"], _sess_tok)
+                    _checkout_url = _create_stripe_checkout(
+                        _tier["price_id"], _sess_tok,
+                        username=_current_user, email=cfg.get("email", ""),
+                    )
                     if _checkout_url:
                         st.markdown(
                             f'<meta http-equiv="refresh" content="0;url={_checkout_url}">',
@@ -3649,10 +3707,14 @@ if st.session_state.get("current_page") == "upgrade":
                     else:
                         _err = st.session_state.get("_stripe_last_error", "No exception captured — check server logs.")
                         st.error(f"Stripe error: {_err}")
-            elif not _tier["price_id"]:
-                st.caption("Configure STRIPE_PRICE env var to enable.")
 
     st.markdown("---")
+    if _sub_tier in ("racer", "pro", "crew_chief"):
+        st.info(
+            "To change or cancel your plan, log in to the "
+            "[Stripe customer portal](https://billing.stripe.com/p/login) "
+            "using the email on your account."
+        )
     st.caption("All plans billed monthly. Cancel anytime. Secure payments via Stripe.")
 
     if st.button("← Back to Run Analysis", key="upgrade_back_btn"):
