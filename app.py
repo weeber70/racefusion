@@ -635,6 +635,13 @@ def _create_stripe_checkout(price_id: str, session_token: str) -> str | None:
         return None
 
 def _verify_login(username: str, password: str) -> bool:
+    st.write(f"DEBUG: attempting login for '{username}'")
+    st.write(f"DEBUG: supabase client type = {type(_sb)}")
+    try:
+        _dbg_result = _sb.table("credentials").select("username, password_hash").eq("username", username).execute()
+        st.write(f"DEBUG: query result = {_dbg_result.data}")
+    except Exception as _dbg_e:
+        st.write(f"DEBUG: query FAILED with error: {str(_dbg_e)}")
     if not _sb: return False
     try:
         rows = _sb.table("credentials").select("salt,password_hash").eq("username", username).execute().data
