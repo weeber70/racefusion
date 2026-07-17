@@ -48,6 +48,7 @@ from admin import show_admin_panel
 from season_summary import show_season_summary
 from race_day_predictor import show_race_day_predictor
 from run_manager import show_run_manager
+from instructions import show_instructions
 from run_analysis import (
     show_run_analysis,
     load_racepak_csv, get_time_col, check_alerts, detect_shift_points, calc_rwhp,
@@ -292,7 +293,7 @@ if st.session_state["rf_user"] is None:
             st.session_state["session_token"] = _sess_param
             # Restore current_page from URL if present
             _p_param = st.query_params.get("p", "")
-            if _p_param in ("dashboard", "predictor", "season", "upgrade"):
+            if _p_param in ("dashboard", "predictor", "season", "upgrade", "instructions"):
                 st.session_state["current_page"] = _p_param
             print(f"[RF-AUTH] ✅ session restored as {_restored_user!r}  page={_p_param!r}", file=_sys_rf.stderr, flush=True)
         else:
@@ -468,13 +469,13 @@ for _k, _v in {
     "active_run_id":           None,        # canonical active run filename
     "upload_gen":              0,           # incremented by Save & Close to reset form state
     "_create_run_instance_key": 0,          # incremented each time user enters Create New Run form
-    "current_page":            "dashboard", # "dashboard" | "predictor" | "season" | "upgrade" | "run_manager"
+    "current_page":            "dashboard", # "dashboard" | "predictor" | "season" | "upgrade" | "run_manager" | "instructions"
 }.items():
     if _k not in st.session_state:
         # Restore current_page from URL on refresh
         if _k == "current_page":
             _pg_param = st.query_params.get("p", "")
-            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season", "upgrade", "run_manager") else _v
+            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season", "upgrade", "run_manager", "instructions") else _v
         else:
             st.session_state[_k] = _v
 
@@ -755,13 +756,23 @@ _cur_page = st.session_state.get("current_page", "dashboard")
 # Keep page in URL so it survives browser refresh
 if st.query_params.get("p") != _cur_page:
     st.query_params["p"] = _cur_page
+if _cur_page != "instructions":
+    if st.sidebar.button("📖 Instructions", use_container_width=True, key="nav_to_instructions"):
+        st.session_state["current_page"] = "instructions"
+        st.query_params["p"] = "instructions"
+        st.rerun()
+if _cur_page != "run_manager":
+    if st.sidebar.button("🗂️ Run Manager", use_container_width=True, key="nav_to_run_manager"):
+        st.session_state["current_page"] = "run_manager"
+        st.query_params["p"] = "run_manager"
+        st.rerun()
 if _cur_page != "dashboard":
-    if st.sidebar.button("📊 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
+    if st.sidebar.button("🏁 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
         st.session_state["current_page"] = "dashboard"
         st.query_params["p"] = "dashboard"
         st.rerun()
 if _cur_page != "predictor":
-    if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
+    if st.sidebar.button("🏎️ Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
         st.session_state["current_page"] = "predictor"
         st.query_params["p"] = "predictor"
         st.rerun()
@@ -771,15 +782,10 @@ if _cur_page != "season":
         st.query_params["p"] = "season"
         st.rerun()
 if _cur_page != "upgrade":
-    _upg_label = "⬆️ Upgrade Plan" if not _access_granted else "⬆️ Manage Subscription"
+    _upg_label = "💳 Upgrade Plan" if not _access_granted else "💳 Manage Subscription"
     if st.sidebar.button(_upg_label, use_container_width=True, key="nav_to_upgrade"):
         st.session_state["current_page"] = "upgrade"
         st.query_params["p"] = "upgrade"
-        st.rerun()
-if _cur_page != "run_manager":
-    if st.sidebar.button("🗂️ Run Manager", use_container_width=True, key="nav_to_run_manager"):
-        st.session_state["current_page"] = "run_manager"
-        st.query_params["p"] = "run_manager"
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -1001,28 +1007,7 @@ st.sidebar.markdown("---")
 _racepak_controls_slot = st.sidebar.container()
 
 # ── RacePak Data ──────────────────────────────────────────────────────────────
-_rp_hdr_col, _rp_help_col = st.sidebar.columns([5, 1])
-_rp_hdr_col.markdown("### 📂 Run Data")
-with _rp_help_col:
-    if st.button("❓", key="racepak_help_btn", help="How to export from DataLink II"):
-        st.session_state["_show_racepak_help"] = not st.session_state.get("_show_racepak_help", False)
-
-if st.session_state.get("_show_racepak_help", False):
-    with st.sidebar.expander("📋 How to Export Your RacePak Data", expanded=True):
-        st.markdown("""
-**How to Export Your RacePak Data**
-
-1. Open your run in DataLink II software
-2. Make all channels active
-3. Go to **File** and select **Print/Save ASCII File**
-4. In the dialog that opens, set the following:
-   - **Column Delimiter:** Comma
-   - **New Page Every:** 0 Lines
-   - **Sampling Interval:** 0.02
-   - Leave **"Directly Print in ASCII (no preview)"** unchecked
-5. Click OK and save the file
-6. Return to RaceFusion and upload the saved file in the **Run Data** section
-""")
+st.sidebar.markdown("### 📂 Run Data")
 
 if _sel_idx_raw == 0:   # "New run…"
     st.sidebar.caption("📋 Use the **Create New Run** form in the main area →")
@@ -1059,21 +1044,7 @@ else:
 st.sidebar.markdown("---")
 
 # ── Timeslip
-_ts_hdr_col, _ts_help_col = st.sidebar.columns([5, 1])
-_ts_hdr_col.markdown("### 🎫 Timeslip Scanner")
-with _ts_help_col:
-    if st.button("❓", key="timeslip_help_btn", help="How to scan your timeslip"):
-        st.session_state["_show_timeslip_help"] = not st.session_state.get("_show_timeslip_help", False)
-
-if st.session_state.get("_show_timeslip_help", False):
-    with st.sidebar.expander("📋 How to Scan Your Timeslip", expanded=True):
-        st.markdown("""
-**How to Scan Your Timeslip**
-
-1. Take a clear photo of your timeslip with your phone
-2. Transfer the photo to your computer
-3. Upload the photo in the **Timeslip Scanner** section
-""")
+st.sidebar.markdown("### 🎫 Timeslip Scanner")
 api_key = _get_secret("ANTHROPIC_API_KEY")
 if not api_key:
     st.sidebar.warning("⚠️ ANTHROPIC_API_KEY not set in .env — timeslip scanning and AI tuner unavailable.")
@@ -1328,18 +1299,26 @@ show_admin_panel(maintenance_on=_maintenance_on, current_user=_current_user)
 
 # ── Race Day Predictor page ─────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "predictor":
-    show_race_day_predictor(cfg=cfg, current_user=_current_user, access_granted=_access_granted)
+    show_race_day_predictor(cfg=cfg, current_user=_current_user, access_granted=_access_granted, logo_src=_LOGO_SRC)
     st.stop()
 
 # ── Season Summary page ─────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "season":
-    show_season_summary(saved_runs=_saved_runs, cfg=cfg)
+    show_season_summary(saved_runs=_saved_runs, cfg=cfg, logo_src=_LOGO_SRC)
     st.stop()
 
 # ── Upgrade page ──────────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "upgrade":
     _sess_tok = st.session_state.get("session_token", "")
 
+    if _LOGO_SRC:
+        st.markdown(
+            f'<img src="{_LOGO_SRC}" style="max-width:520px;width:60%;'
+            f'margin:0 auto 4px auto;display:block;">',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("## 🏁 RaceFusion")
     st.markdown("# ⬆️ Upgrade RaceFusion")
 
     # ── Proactive Stripe check on every upgrade page load for trial users ─────
@@ -1577,7 +1556,12 @@ if st.session_state.get("current_page") == "upgrade":
 
 # ── Run Manager page ────────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "run_manager":
-    show_run_manager(saved_runs=_saved_runs, current_user=_current_user, access_granted=_access_granted)
+    show_run_manager(saved_runs=_saved_runs, current_user=_current_user, access_granted=_access_granted, logo_src=_LOGO_SRC)
+    st.stop()
+
+# ── Instructions page ────────────────────────────────────────────────────────────
+if st.session_state.get("current_page") == "instructions":
+    show_instructions(logo_src=_LOGO_SRC)
     st.stop()
 
 # ── Main area (Run Analysis / Create New Run) ───────────────────────────────────

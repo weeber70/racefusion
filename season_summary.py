@@ -6,8 +6,16 @@ from datetime import datetime
 from weather import calc_density_altitude
 
 
-def show_season_summary(saved_runs: list, cfg: dict):
+def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = None):
     """Render the Season Summary page."""
+    if logo_src:
+        st.markdown(
+            f'<img src="{logo_src}" style="max-width:520px;width:60%;'
+            f'margin:0 auto 4px auto;display:block;">',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("## 🏁 RaceFusion")
     st.markdown("# 📅 Season Summary")
     st.markdown(
         "<p style='color:#888;margin-top:-12px;'>Season stats and records pulled from your saved runs.</p>",

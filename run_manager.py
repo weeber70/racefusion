@@ -8,8 +8,16 @@ from database import _sb, _delete_run_files
 from weather import _track_key, calc_density_altitude
 
 
-def show_run_manager(saved_runs: list, current_user: str, access_granted: bool):
+def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, logo_src: "str | None" = None):
     """Render the Run Manager page."""
+    if logo_src:
+        st.markdown(
+            f'<img src="{logo_src}" style="max-width:520px;width:60%;'
+            f'margin:0 auto 4px auto;display:block;">',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("## 🏁 RaceFusion")
     st.markdown("# 🗂️ Run Manager")
 
     # ── Init session state ─────────────────────────────────────────────────────

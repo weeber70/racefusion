@@ -43,10 +43,18 @@ def _rdp_r_squared(xs, ys, slope, intercept) -> float:
 
 
 
-def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool):
+def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, logo_src: "str | None" = None):
     """Render the Race Day Predictor page."""
     import urllib.parse as _rdp_urlparse
 
+    if logo_src:
+        st.markdown(
+            f'<img src="{logo_src}" style="max-width:520px;width:60%;'
+            f'margin:0 auto 4px auto;display:block;">',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("## 🏁 RaceFusion")
     st.markdown("# 🏁 Race Day Predictor")
     st.markdown(
         "<p style='color:#888;margin-top:-12px;'>Predicted ET and suggested dial based on your car's history + today's air.</p>",
