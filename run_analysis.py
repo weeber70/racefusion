@@ -1210,9 +1210,12 @@ def show_run_analysis(
 
     # ── Left: Run Details ─────────────────────────────────────────────────────────
     with _main_left:
-        if st.session_state.pop("run_details_saved_msg", False):
-            st.success("Run details saved.")
-        with st.expander("📋 Run Details", expanded=st.session_state.get("run_details_expanded", False)):
+        _rd_saved_msg = st.session_state.pop("run_details_saved_msg", False)
+        with st.expander(
+            "📋 Run Details",
+            expanded=st.session_state.get("run_details_expanded", False),
+            key=f"run_details_{st.session_state.get('run_details_key', 0)}",
+        ):
             _rk = csv_name  # widget key shorthand — scoped to run so values reset on switch
             st.divider()
             with st.form(f"rd_form_{_rk}"):
@@ -1347,9 +1350,13 @@ def show_run_analysis(
                             (i + 1 for i, r in enumerate(saved_runs) if r["filename"] == _save_active_run_id),
                             st.session_state.get("_run_selector_idx", 0),
                         )
-                    st.session_state["run_details_saved_msg"] = True
+                    st.session_state["run_details_key"] = st.session_state.get("run_details_key", 0) + 1
                     st.session_state["run_details_expanded"] = False
+                    st.session_state["run_details_saved_msg"] = True
                     st.rerun()
+
+        if _rd_saved_msg:
+            st.success("Run details saved.")
 
     # ── Right: Changes from last run (auto-diff) ──────────────────────────────────
     with _main_right:
