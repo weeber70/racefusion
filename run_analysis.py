@@ -646,6 +646,10 @@ def show_run_analysis(
         csv_name = saved_runs[sel_idx_raw - 1]["filename"]
         st.session_state["active_run_id"] = csv_name
         st.query_params["run"] = csv_name
+    # Reset Run Details expander state when the user opens a different run
+    if csv_name != st.session_state.get("_last_opened_run_id"):
+        st.session_state["run_details_expanded"] = False
+        st.session_state["_last_opened_run_id"] = csv_name
     # Load CSV bytes now — deferred from the sidebar so uploads are fully processed first
     _run_meta_now     = next((r for r in saved_runs if r["filename"] == csv_name), None)
     _active_csv_bytes = load_run_csv_bytes(csv_name) if (_run_meta_now and _run_meta_now["has_csv"]) else None
@@ -1206,6 +1210,8 @@ def show_run_analysis(
 
     # ── Left: Run Details ─────────────────────────────────────────────────────────
     with _main_left:
+        if st.session_state.pop("run_details_saved_msg", False):
+            st.success("Run details saved.")
         with st.expander("📋 Run Details", expanded=st.session_state.get("run_details_expanded", False)):
             _rk = csv_name  # widget key shorthand — scoped to run so values reset on switch
             st.divider()
@@ -1341,6 +1347,7 @@ def show_run_analysis(
                             (i + 1 for i, r in enumerate(saved_runs) if r["filename"] == _save_active_run_id),
                             st.session_state.get("_run_selector_idx", 0),
                         )
+                    st.session_state["run_details_saved_msg"] = True
                     st.session_state["run_details_expanded"] = False
                     st.rerun()
 
