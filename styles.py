@@ -81,32 +81,13 @@ h1, h2, h3, h4, h5, h6 {
 [data-testid="stSidebar"] h3 {
     color: #cc1111 !important;
 }
-/* ── Inputs ── */
-input, textarea, select,
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input,
-[data-testid="stTextArea"] textarea,
-[data-testid="stSelectbox"] select {
-    background-color: #141420 !important;
-    color: #e8e8e8 !important;
-    border: 1px solid #2a2a3a !important;
-    border-radius: 6px !important;
-}
 /* ── Placeholder text — readable but clearly distinct from entered values ── */
 input::placeholder, textarea::placeholder,
 [data-testid="stTextInput"] input::placeholder,
 [data-testid="stNumberInput"] input::placeholder,
 [data-testid="stTextArea"] textarea::placeholder {
-    color: #888888 !important;
+    color: rgba(255,255,255,0.4) !important;
     opacity: 1 !important;
-}
-[data-baseweb="select"] > div,
-[data-baseweb="select"] > div:hover,
-[data-baseweb="select"] > div:focus-within,
-[data-baseweb="input"] > div,
-[data-baseweb="input"] > div:hover {
-    background-color: #141420 !important;
-    border: 1px solid #2a2a3a !important;
 }
 [data-baseweb="select"] > div:hover {
     border-color: #8b0000 !important;
@@ -221,22 +202,24 @@ button[kind="secondary"]:hover {
 /* ── Tabs & sections ── */
 [data-testid="stHorizontalBlock"] { gap: 1rem; }
 [data-testid="stVerticalBlock"] { gap: 0.5rem; }
-/* ── File uploader dropzone — white bg so use dark text ── */
-/* Scope to instructions only; the span rule was too broad and made the button icon dark */
-[data-testid="stFileUploaderDropzoneInstructions"],
-[data-testid="stFileUploaderDropzoneInstructions"] *,
-[data-testid="stFileUploaderDropzone"] small,
-[data-testid="stFileUploaderDropzone"] p,
-[data-testid="stFileUploaderDropzone"] span:not(button span) {
+/* ── File uploader dropzone — white background, dark text ── */
+[data-testid="stFileUploadDropzone"] {
+    background-color: #ffffff !important;
+    border: 1px solid #cccccc !important;
+}
+[data-testid="stFileUploadDropzone"] span,
+[data-testid="stFileUploadDropzone"] p,
+[data-testid="stFileUploadDropzone"] small {
     color: #333333 !important;
 }
-/* Undo dark color for anything inside the Upload button itself */
+[data-testid="stFileUploadDropzone"] svg {
+    fill: #333333 !important;
+}
+/* ── File uploader — button and icon colors ── */
 [data-testid="stFileUploaderDropzone"] button,
 [data-testid="stFileUploaderDropzone"] button * {
     color: #ffffff !important;
 }
-/* Upload button icon — color forced white via JS MutationObserver (CSS filter
-   is blocked by BaseWeb inline styles; see components.html fixUploaderIcons) */
 [data-testid="stFileUploaderDropzone"] button svg,
 [data-testid="stFileUploader"] button svg {
     color: #ffffff !important;
@@ -244,10 +227,6 @@ button[kind="secondary"]:hover {
 [data-testid="stFileUploaderDropzone"] button svg path,
 [data-testid="stFileUploader"] button svg path {
     fill: currentColor !important;
-}
-/* ── File uploader — all text dark since bg is white ── */
-[data-testid="stFileUploader"] *:not(button):not(button *):not(svg):not(path) {
-    color: #333333 !important;
 }
 [data-testid="stFileUploader"] button,
 [data-testid="stFileUploader"] button * {
