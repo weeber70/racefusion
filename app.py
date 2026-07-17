@@ -1591,4 +1591,6 @@ show_run_analysis(
     has_feature=_has_feature,
     channel_groups=CHANNEL_GROUPS,
     all_grouped=ALL_GROUPED,
+    _scan_status_area=_scan_status_area,
+    _racepak_controls_slot=_racepak_controls_slot,
 )

@@ -21,10 +21,10 @@ import streamlit.components.v1 as components
 
 from styles import PLOTLY_DARK
 from database import (
-    _sb, load_run, save_run, save_run_csv, load_run_csv_bytes,
+    _sb, _get_secret, load_run, save_run, save_run_csv, load_run_csv_bytes,
     _run_label, list_saved_runs, get_run_videos, add_run_video,
     delete_run_video, get_user_cars, create_car, _get_slip_storage_key,
-    extract_youtube_id,
+    extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
 )
 from config import load_config, save_config
 from weather import (
@@ -213,8 +213,15 @@ def show_run_analysis(
     has_feature,
     channel_groups: dict,
     all_grouped: list,
+    _scan_status_area,
+    _racepak_controls_slot,
 ):
     """Render the Create-New-Run form and the Run Analysis dashboard."""
+    # ── Values that were global in app.py before the Phase 2 split ───────────────
+    api_key = _get_secret("ANTHROPIC_API_KEY")
+    car_number_input = cfg.get("car_number", "")
+    weight_input = int(cfg.get("car_weight_lbs", 2500))
+
     # ── Main area ─────────────────────────────────────────────────────────────────
 
     if st.session_state.get("active_run_id") is None:
