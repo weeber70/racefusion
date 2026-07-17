@@ -257,12 +257,13 @@ def show_season_summary(saved_runs: list, cfg: dict):
         _res_icon  = {"Win": "🏆", "Loss": "❌", "Bye": "🚗"}.get(_res_val, "")
         _res_disp  = f"{_res_icon} {_res_val}" if _res_val else "—"
 
-        # DA: prefer stored, fall back to recalc
-        _da2 = _wx2.get("density_alt_ft")
-        if _da2 is None:
-            _da2 = calc_density_altitude(
-                _wx2.get("temperature_f"), _wx2.get("pressure_hpa")
-            )
+        # DA: same source as run_analysis.py "Weather at Run Time" card —
+        # raw stored pressure_hpa + user's configured elevation from cfg.
+        _ssm_elev_ft = float(cfg.get("elev_ft") or 0)
+        _da2 = calc_density_altitude(
+            _wx2.get("temperature_f"), _wx2.get("pressure_hpa"),
+            _wx2.get("humidity_pct"), _ssm_elev_ft,
+        )
         _da_disp = f"{int(round(_da2)):,}" if _da2 is not None else "—"
 
         # Date + time combined for display (e.g. "2026-06-13 10:34 AM")
