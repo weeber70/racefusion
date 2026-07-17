@@ -3,11 +3,11 @@ season_summary.py — RaceFusion Season Summary page.
 """
 import streamlit as st
 from datetime import datetime
+from weather import calc_density_altitude
 
 
 def show_season_summary(saved_runs: list, cfg: dict):
     """Render the Season Summary page."""
-if st.session_state.get("current_page") == "season":
     st.markdown("# 📅 Season Summary")
     st.markdown(
         "<p style='color:#888;margin-top:-12px;'>Season stats and records pulled from your saved runs.</p>",
