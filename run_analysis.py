@@ -257,6 +257,14 @@ def show_run_analysis(
                 st.session_state["current_page"] = "upgrade"
                 st.query_params["p"] = "upgrade"
                 st.rerun()
+            st.markdown(
+                "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+                "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+                "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+                "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+                "text-decoration:none;'>Contact Us</a></div>",
+                unsafe_allow_html=True,
+            )
             st.stop()
 
         if logo_src:
@@ -638,6 +646,14 @@ def show_run_analysis(
                 st.session_state.pop("_pending_timeslip", None)
                 st.rerun()
 
+        st.markdown(
+            "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+            "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+            "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+            "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+            "text-decoration:none;'>Contact Us</a></div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
 
     # ── Load RacePak data (may be None for closed runs) ───────────────────────────
@@ -1459,6 +1475,14 @@ def show_run_analysis(
             st.query_params["p"] = "upgrade"
             st.session_state["current_page"] = "upgrade"
             st.rerun()
+        st.markdown(
+            "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+            "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+            "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+            "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+            "text-decoration:none;'>Contact Us</a></div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
 
     def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list,
@@ -2353,6 +2377,14 @@ def show_run_analysis(
 
     # ── Channel charts (one chart per group, all channels overlaid) ───────────────
     if not _csv_available:
+        st.markdown(
+            "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+            "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+            "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+            "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+            "text-decoration:none;'>Contact Us</a></div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
 
     if not has_feature("channel_charts"):
@@ -2370,6 +2402,14 @@ def show_run_analysis(
             st.session_state["current_page"] = "upgrade"
             st.query_params["p"] = "upgrade"
             st.rerun()
+        st.markdown(
+            "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+            "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+            "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+            "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+            "text-decoration:none;'>Contact Us</a></div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
 
     # EGT channels are shown in the dedicated EGT panel above — skip here
@@ -2941,4 +2981,12 @@ def show_run_analysis(
             )
         else:
             st.info("No saved runs to export.")
+    st.markdown(
+        "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+        "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+        "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+        "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+        "text-decoration:none;'>Contact Us</a></div>",
+        unsafe_allow_html=True,
+    )
 

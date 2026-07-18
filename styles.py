@@ -81,24 +81,6 @@ h1, h2, h3, h4, h5, h6 {
 [data-testid="stSidebar"] h3 {
     color: #cc1111 !important;
 }
-/* ── Placeholder text — readable but clearly distinct from entered values ── */
-input::placeholder, textarea::placeholder,
-[data-testid="stTextInput"] input::placeholder,
-[data-testid="stNumberInput"] input::placeholder,
-[data-testid="stTextArea"] textarea::placeholder {
-    color: rgba(255,255,255,0.4) !important;
-    opacity: 1 !important;
-}
-[data-baseweb="select"] > div:hover {
-    border-color: #8b0000 !important;
-}
-[data-baseweb="select"] *,
-[data-baseweb="select"]:hover *,
-[data-baseweb="select"] > div > div,
-[data-baseweb="select"] > div > div * {
-    background-color: #141420 !important;
-    color: #e8e8e8 !important;
-}
 /* ── Buttons ── */
 button[kind="primary"], [data-testid="baseButton-primary"] {
     background-color: #cc1111 !important;
@@ -144,24 +126,6 @@ button[kind="secondary"]:hover {
 [data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:hover {
     background-color: #ee2222 !important;
 }
-/* ── Number input stepper (+/−) buttons ── */
-[data-testid="stNumberInput"] button {
-    background-color: #1e1e2e !important;
-    color: #e8e8e8 !important;
-    border: 1px solid #2a2a3a !important;
-}
-[data-testid="stNumberInput"] button:hover {
-    background-color: #2a1a1a !important;
-    border-color: #cc1111 !important;
-    color: #ffffff !important;
-}
-[data-testid="stNumberInput"] button svg,
-[data-testid="stNumberInput"] button svg path,
-[data-testid="stNumberInput"] button p {
-    fill: #e8e8e8 !important;
-    color: #e8e8e8 !important;
-    stroke: #e8e8e8 !important;
-}
 /* ── Expanders ── */
 [data-testid="stExpander"] {
     background-color: #0f0f18 !important;
@@ -202,49 +166,10 @@ button[kind="secondary"]:hover {
 /* ── Tabs & sections ── */
 [data-testid="stHorizontalBlock"] { gap: 1rem; }
 [data-testid="stVerticalBlock"] { gap: 0.5rem; }
-/* ── File uploader dropzone — white background, dark text ── */
-[data-testid="stFileUploadDropzone"] {
-    background-color: #ffffff !important;
-    border: 1px solid #cccccc !important;
-}
-[data-testid="stFileUploadDropzone"] span,
-[data-testid="stFileUploadDropzone"] p,
-[data-testid="stFileUploadDropzone"] small {
-    color: #333333 !important;
-}
-[data-testid="stFileUploadDropzone"] svg {
-    fill: #333333 !important;
-}
-/* ── File uploader — button and icon colors ── */
-[data-testid="stFileUploaderDropzone"] button,
-[data-testid="stFileUploaderDropzone"] button * {
-    color: #ffffff !important;
-}
-[data-testid="stFileUploaderDropzone"] button svg,
-[data-testid="stFileUploader"] button svg {
-    color: #ffffff !important;
-}
-[data-testid="stFileUploaderDropzone"] button svg path,
-[data-testid="stFileUploader"] button svg path {
-    fill: currentColor !important;
-}
-[data-testid="stFileUploader"] button,
-[data-testid="stFileUploader"] button * {
-    color: #ffffff !important;
-}
 /* ── Alerts / Info ── */
 [data-testid="stAlert"] {
     background-color: #2a0000 !important;
     border-left: 4px solid #ff2222 !important;
-}
-/* ── Sliders ── */
-[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {
-    background-color: #cc1111 !important;
-}
-/* ── Checkboxes ── */
-[data-testid="stCheckbox"] input:checked + div {
-    background-color: #cc1111 !important;
-    border-color: #cc1111 !important;
 }
 /* ── Plotly chart backgrounds ── */
 .js-plotly-plot .plotly, .js-plotly-plot .plotly .main-svg {
@@ -337,12 +262,6 @@ def apply_login_styles():
     st.markdown("""<style>
 .stApp,[data-testid="stAppViewContainer"]{background:#08080d!important}
 .stApp *{color:#e8e8e8!important}
-input,textarea{background:#141420!important;color:#e8e8e8!important;border:1px solid #2a2a3a!important;border-radius:6px!important;caret-color:#e8e8e8!important}
-input::placeholder,textarea::placeholder{color:#888!important;opacity:1!important}
-input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{-webkit-text-fill-color:#e8e8e8!important;-webkit-box-shadow:0 0 0 1000px #141420 inset!important}
-[data-baseweb="input"],[data-baseweb="input"]>div,[data-baseweb="base-input"]{background:#141420!important;color:#e8e8e8!important}
-[data-baseweb="input"] input{background:#141420!important;color:#e8e8e8!important}
-[data-testid="stTextInput"] input{background:#141420!important;color:#e8e8e8!important}
 [data-testid="baseButton-primary"]{background:#cc1111!important;color:#fff!important;font-weight:700!important;border:none!important}
 [data-testid="baseButton-secondary"]{background:#1a1a24!important;color:#e8e8e8!important;border:1px solid #3a2a2a!important}
 [data-testid="stAlert"]{background:#2a0000!important;border-left:4px solid #ff2222!important}

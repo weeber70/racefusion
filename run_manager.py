@@ -259,4 +259,12 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
                             break
                     st.rerun()
 
+    st.markdown(
+        "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+        "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+        "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+        "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+        "text-decoration:none;'>Contact Us</a></div>",
+        unsafe_allow_html=True,
+    )
     st.stop()  # Don't render the dashboard on the run manager page

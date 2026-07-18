@@ -347,10 +347,43 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
         else:
             _rdp_history = _rdp_load_run_history(current_user)
 
+            # Supplement history with run_type, mph, and run time.
+            # Key by csv_filename (plain text) to avoid UUID matching issues with .in_("id", ...).
+            _rdp_extra: dict = {}
+            if _sb and _rdp_history:
+                try:
+                    _rdp_filenames = [r["csv_filename"] for r in _rdp_history if r.get("csv_filename")]
+                    _rdp_extra_rows = (
+                        _sb.table("runs")
+                        .select("csv_filename,run_data")
+                        .in_("csv_filename", _rdp_filenames)
+                        .execute().data or []
+                    )
+                    print(f"[RDP extra fetch] requested {len(_rdp_filenames)} filenames, got {len(_rdp_extra_rows)} rows back")
+                    for _rex in _rdp_extra_rows:
+                        _rex_rd   = _rex.get("run_data") or {}
+                        # run_type is top-level in run_data, NOT inside run_details
+                        _rex_slip = _rex_rd.get("timeslip") or {}
+                        _rex_fn   = _rex.get("csv_filename", "")
+                        _rex_rt   = _rex_rd.get("run_type") or ""
+                        print(f"[RDP extra] {_rex_fn!r} → run_type={_rex_rt!r}")
+                        _rdp_extra[_rex_fn] = {
+                            "run_type": _rex_rt,
+                            "mph":      _rex_slip.get("mph_1320"),
+                            "time":     _rex_slip.get("time") or "",
+                        }
+                except Exception as _rdp_extra_err:
+                    print(f"[RDP extra fetch] FAILED: {_rdp_extra_err}")
+            for _r in _rdp_history:
+                _rx = _rdp_extra.get(_r.get("csv_filename", ""), {})
+                _r["run_type"] = _rx.get("run_type", "")
+                _r["mph"]      = _rx.get("mph")
+                _r["time"]     = _rx.get("time", "")
+
             if not _rdp_history:
                 st.info("No historical runs with both ET and DA found. Log runs with timeslips to enable predictions.")
             else:
-                # IQR outlier detection
+                # ── IQR fences (computed from all run ETs before any exclusion) ──────
                 _rdp_all_ets = sorted(r["et"] for r in _rdp_history)
                 _rdp_n       = len(_rdp_all_ets)
                 _rdp_q1      = _rdp_percentile(_rdp_all_ets, 25)
@@ -360,18 +393,45 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                 _rdp_hi      = _rdp_q3 + 1.5 * _rdp_iqr
                 _rdp_mean_et = sum(_rdp_all_ets) / _rdp_n
 
+                # ── Initialize checkbox session state once per run ────────────────
+                # Priority: saved DB preference → auto-default (run_type + IQR).
+                # Guard ensures in-session user choices are never overwritten.
+                for _rdp_r in _rdp_history:
+                    _init_key = f"run_include_{_rdp_r['run_id']}"
+                    if _init_key not in st.session_state:
+                        _init_rtype    = _rdp_r.get("run_type", "")
+                        _init_rtype_ok = (not _init_rtype) or (_init_rtype in ("Full Pass", "Bye"))
+                        _init_iqr_ok   = not (_rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi)
+                        _init_db_excl  = _rdp_r.get("predictor_exclude")
+                        if _init_db_excl is True:
+                            st.session_state[_init_key] = False
+                        elif _init_db_excl is False:
+                            st.session_state[_init_key] = True
+                        else:
+                            # No saved preference — auto-default based on run_type + IQR
+                            st.session_state[_init_key] = _init_rtype_ok and _init_iqr_ok
+
+                # ── Build included/excluded from checkbox session state ────────────
+                # The checkbox value is the single source of truth for regression input.
                 _rdp_included = []
                 _rdp_excluded = []
                 for _rdp_r in _rdp_history:
-                    _rdp_uov = _rdp_r.get("predictor_exclude")   # None / True / False
-                    if _rdp_uov is True:
-                        _rdp_excluded.append({**_rdp_r, "status": "excluded — manual override"})
-                    elif _rdp_uov is False:
-                        _rdp_included.append({**_rdp_r, "status": "included (manual override)"})
-                    elif _rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi:
-                        _rdp_excluded.append({**_rdp_r, "status": "excluded — outlier (IQR)"})
+                    _rdp_chk_key  = f"run_include_{_rdp_r['run_id']}"
+                    _rdp_checked  = st.session_state.get(_rdp_chk_key, False)
+                    _rdp_rtype    = _rdp_r.get("run_type", "")
+                    _rdp_rtype_ok = (not _rdp_rtype) or (_rdp_rtype in ("Full Pass", "Bye"))
+                    _rdp_iqr_out  = _rdp_r["et"] < _rdp_lo or _rdp_r["et"] > _rdp_hi
+                    if _rdp_checked:
+                        _rdp_status = "included" if _rdp_rtype_ok else "force-included (override)"
+                        _rdp_included.append({**_rdp_r, "status": _rdp_status})
                     else:
-                        _rdp_included.append({**_rdp_r, "status": "included"})
+                        if not _rdp_rtype_ok:
+                            _rdp_status = "excluded — non-qualifying run type"
+                        elif _rdp_iqr_out:
+                            _rdp_status = "excluded — outlier (IQR)"
+                        else:
+                            _rdp_status = "excluded — manual"
+                        _rdp_excluded.append({**_rdp_r, "status": _rdp_status})
 
                 _rdp_n_incl = len(_rdp_included)
                 if _rdp_n_incl < 2:
@@ -432,22 +492,22 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                 st.markdown("## 📋 Run History Used in Prediction")
                 st.caption(
                     "Check **Include** to force-include a run; uncheck to force-exclude. "
-                    "Non-Full Pass runs and IQR outliers are excluded automatically."
+                    "Non-Full Pass/Bye runs and IQR outliers are excluded automatically."
                 )
                 _rdp_display = []
                 for _rdp_r in _rdp_included:
                     _rdp_display.append({**_rdp_r, "status": "included"})
                 for _rdp_r in _rdp_excluded:
                     _rdp_display.append(_rdp_r)
-                _rdp_display.sort(key=lambda x: x["date"], reverse=True)
+                _rdp_display.sort(key=lambda x: (x.get("date") or "", x.get("time") or ""), reverse=True)
 
-                _rdp_col_w = [1, 2, 3, 2, 2, 3]
+                _rdp_col_w = [1, 2, 3, 2, 2, 2, 2, 3]
 
                 # Header row
                 _rdp_hdr = st.columns(_rdp_col_w)
                 for _hcol, _hlbl in zip(
                     _rdp_hdr,
-                    ["Include", "Date", "Track", "ET", "DA ft", "Status"],
+                    ["Include", "Date", "Track", "Run Type", "ET", "MPH", "DA ft", "Status"],
                 ):
                     _hcol.markdown(
                         f"<span style='font-size:0.75em;color:#888;"
@@ -459,37 +519,69 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                     unsafe_allow_html=True,
                 )
 
-                _rdp_changes = {}   # {run_id: new_include_bool} for any toggled rows
+                _rdp_changes = {}   # {run_id: new_include_bool} for runs that drifted from DB
                 for _rdp_row in _rdp_display:
-                    _run_id = _rdp_row.get("run_id", "")
-                    _is_inc = not _rdp_row["status"].startswith("excluded")
-                    _status = _rdp_row["status"]
+                    _run_id  = _rdp_row.get("run_id", "")
+                    _chk_key = f"run_include_{_run_id}"
+                    _status  = _rdp_row["status"]
 
                     if _status == "included":
                         _status_html = "<span style='color:#4CAF50'>included</span>"
-                    elif "manual override" in _status:
-                        _status_html = "<span style='color:#888'>excluded — manual override</span>"
-                    else:
+                    elif _status == "force-included (override)":
+                        _status_html = "<span style='color:#2ecc71'>force-included (override)</span>"
+                    elif _status == "excluded — non-qualifying run type":
+                        _status_html = "<span style='color:#cc8800'>excluded — non-qualifying run type</span>"
+                    elif _status == "excluded — outlier (IQR)":
                         _status_html = "<span style='color:#FFA500'>excluded — outlier (IQR)</span>"
+                    else:
+                        _status_html = "<span style='color:#888'>excluded — manual</span>"
+
+                    # Date + time combined (same logic as Season Summary)
+                    _rdp_date_str = _rdp_row.get("date") or ""
+                    _rdp_time_str = _rdp_row.get("time") or ""
+                    if _rdp_time_str:
+                        try:
+                            from datetime import datetime as _rdp_dtparse
+                            _rdp_t = _rdp_dtparse.strptime(_rdp_time_str.strip(), "%H:%M")
+                            _rdp_time_disp = _rdp_t.strftime("%-I:%M %p")
+                        except Exception:
+                            _rdp_time_disp = _rdp_time_str
+                        _rdp_date_disp = f"{_rdp_date_str} {_rdp_time_disp}" if _rdp_date_str else _rdp_time_disp
+                    else:
+                        _rdp_date_disp = _rdp_date_str or "—"
 
                     _rdp_cols = st.columns(_rdp_col_w)
+                    # No value= — session state (set during initialization above) is the source of truth
                     _new_inc = _rdp_cols[0].checkbox(
-                        "", value=_is_inc,
-                        key=f"run_include_{_run_id}",
+                        "",
+                        key=_chk_key,
                         label_visibility="collapsed",
                     )
-                    _rdp_cols[1].write(_rdp_row["date"] or "—")
+                    _rdp_cols[1].write(_rdp_date_disp)
                     _rdp_cols[2].write(_rdp_row.get("track") or "—")
-                    _rdp_cols[3].write(f"{_rdp_row['et']:.3f}")
-                    _rdp_cols[4].write(f"{int(round(_rdp_row['da'])):,}")
-                    _rdp_cols[5].markdown(_status_html, unsafe_allow_html=True)
+                    _rdp_cols[3].write(_rdp_row.get("run_type") or "—")
+                    _rdp_cols[4].write(f"{_rdp_row['et']:.3f}")
+                    _rdp_mph = _rdp_row.get("mph")
+                    _rdp_cols[5].write(f"{float(_rdp_mph):.2f}" if _rdp_mph else "—")
+                    _rdp_cols[6].write(f"{int(round(_rdp_row['da'])):,}")
+                    _rdp_cols[7].markdown(_status_html, unsafe_allow_html=True)
                     st.markdown(
                         "<hr style='margin:2px 0;border-color:#222'>",
                         unsafe_allow_html=True,
                     )
 
-                    if _new_inc != _is_inc:
-                        _rdp_changes[_run_id] = _new_inc
+                    # Detect drift from DB for persistence (compare to predictor_exclude in DB)
+                    _db_excl = _rdp_row.get("predictor_exclude")
+                    _row_rtype    = _rdp_row.get("run_type", "")
+                    _row_rtype_ok = (not _row_rtype) or (_row_rtype in ("Full Pass", "Bye"))
+                    _row_iqr_ok   = not (_rdp_row["et"] < _rdp_lo or _rdp_row["et"] > _rdp_hi)
+                    _auto_default = _row_rtype_ok and _row_iqr_ok
+                    if _db_excl is True and _new_inc:
+                        _rdp_changes[_run_id] = True   # user re-included a DB-excluded run
+                    elif _db_excl is False and not _new_inc:
+                        _rdp_changes[_run_id] = False  # user re-excluded a DB-included run
+                    elif _db_excl is None and _new_inc != _auto_default:
+                        _rdp_changes[_run_id] = _new_inc  # user overrode the auto-default
 
                 st.caption(
                     f"{_rdp_n_incl} included · {len(_rdp_excluded)} excluded · "
@@ -497,7 +589,8 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                     f"Q1 {_rdp_q1:.3f}s · Q3 {_rdp_q3:.3f}s"
                 )
 
-                # Persist overrides to Supabase when a checkbox is toggled
+                # Persist overrides to Supabase when a checkbox drifted from DB state.
+                # No explicit st.rerun() — the checkbox interaction already triggers one.
                 if _sb and _rdp_changes:
                     for _crid, _cinc in _rdp_changes.items():
                         try:
@@ -508,6 +601,13 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                                 _sb.table("runs").update({"run_data": _crd}).eq("id", _crid).execute()
                         except Exception as _ce:
                             st.error(f"Failed to save run override: {_ce}")
-                    st.rerun()
 
+    st.markdown(
+        "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+        "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+        "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+        "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+        "text-decoration:none;'>Contact Us</a></div>",
+        unsafe_allow_html=True,
+    )
     st.stop()  # Don't render the dashboard when on predictor page

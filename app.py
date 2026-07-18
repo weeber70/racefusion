@@ -104,6 +104,14 @@ def _load_logo_b64(filename: str = "RaceFusion-Logo-V2.png") -> str | None:
 
 _LOGO_SRC = _load_logo_b64("RaceFusion-Logo-V2.png")
 
+_FOOTER_HTML = (
+    "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+    "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+    "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+    "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+    "text-decoration:none;'>Contact Us</a></div>"
+)
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 APP_DIR = Path(__file__).parent
 
@@ -1199,20 +1207,6 @@ elif _active_csv_name:
             st.query_params["run"] = _active_csv_name
             st.rerun()
         st.sidebar.caption(f"✅ Timeslip on file: {_existing_slip_key.split('/')[-1]}")
-        # Car number editor — lets user correct the number before re-scanning
-        _cn_col, _cn_btn_col = st.sidebar.columns([3, 1])
-        _cn_current = _existing_run.get("car_number", "") or car_number_input
-        _cn_input = _cn_col.text_input(
-            "Car number",
-            value=_cn_current,
-            key=f"sidebar_car_num_{_active_csv_name}",
-            placeholder="Car #",
-        )
-        if _cn_btn_col.button("Save", key=f"sidebar_car_num_save_{_active_csv_name}",
-                              use_container_width=True):
-            _existing_run["car_number"] = _cn_input.strip()
-            save_run(_active_csv_name, _existing_run)
-            st.rerun()
 
 st.sidebar.markdown("---")
 
@@ -1305,6 +1299,7 @@ if st.session_state.get("current_page") == "predictor":
 # ── Season Summary page ─────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "season":
     show_season_summary(saved_runs=_saved_runs, cfg=cfg, logo_src=_LOGO_SRC)
+    st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
 # ── Upgrade page ──────────────────────────────────────────────────────────────
@@ -1552,6 +1547,7 @@ if st.session_state.get("current_page") == "upgrade":
         st.query_params["p"] = "dashboard"
         st.rerun()
 
+    st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()  # Don't render the dashboard on the upgrade page
 
 # ── Run Manager page ────────────────────────────────────────────────────────────
@@ -1562,6 +1558,7 @@ if st.session_state.get("current_page") == "run_manager":
 # ── Instructions page ────────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "instructions":
     show_instructions(logo_src=_LOGO_SRC)
+    st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
 # ── Main area (Run Analysis / Create New Run) ───────────────────────────────────
@@ -1578,3 +1575,4 @@ show_run_analysis(
     _scan_status_area=_scan_status_area,
     _racepak_controls_slot=_racepak_controls_slot,
 )
+st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
