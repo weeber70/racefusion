@@ -34,7 +34,10 @@ from weather import (
     calc_density_altitude, sea_level_to_station_pressure, wind_dir_label,
     _TRACK_OVERRIDES, _track_key,
 )
-from charts import make_overlay_chart, TRACE_COLORS, RPM_CHANNEL_NAMES
+from charts import (
+    make_overlay_chart, TRACE_COLORS, RPM_CHANNEL_NAMES,
+    CHANNEL_COLORS, CHANNEL_UNITS,
+)
 from timeslip import correct_image_orientation, scan_timeslip, _normalize_slip_result
 
 
@@ -2494,6 +2497,13 @@ def show_run_analysis(
     _egt_group_name = "🌡️ EGT (Exhaust Temps)"
     _egt_chs_set = set(_cyl_channels) | ({_avg_egt_ch} if _avg_egt_ch else set())
 
+    # Default primary channel per group — must be present in the group's channel list
+    _GROUP_PRIMARY_DEFAULTS = {
+        "🔥 Engine":        "Engine RPM",
+        "⚡ Performance":   "Accel G",
+        "🌡️ Temperatures": "Trans Temp",
+    }
+
     st.caption("*Click a legend item to toggle that channel on or off.*")
     for grp in selected_groups:
         if grp == _egt_group_name:
@@ -2508,23 +2518,38 @@ def show_run_analysis(
         if not grp_channels:
             continue
 
-        fig = make_overlay_chart(grp_channels, grp, time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, global_rpm_max=_global_rpm_max,
-                                 y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
+        st.markdown(f"### {grp}")
+
+        # Y-axis primary channel selector — persists per group across reruns
+        _grp_default = _GROUP_PRIMARY_DEFAULTS.get(grp, grp_channels[0])
+        if _grp_default not in grp_channels:
+            _grp_default = grp_channels[0]
+        _primary_ch = st.selectbox(
+            "Y-axis channel", grp_channels,
+            index=grp_channels.index(_grp_default),
+            key=f"primary_ch_{grp}",
+        )
+
+        fig = make_overlay_chart(grp_channels, _primary_ch, grp, time_col, df_view, t_range, mode, chart_height,
+                                 dark=True, smooth_points=smooth_points)
         if fig:
-            st.markdown(f"### {grp}")
             st.plotly_chart(fig, use_container_width=True)
-            st.markdown("---")
+        st.markdown("---")
 
     # ── Custom Overlay chart ──────────────────────────────────────────────────────
     if custom_channels:
-        fig = make_overlay_chart(custom_channels, "Custom Overlay", time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, global_rpm_max=_global_rpm_max,
-                                 y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
+        st.markdown("### 🔀 Custom Overlay")
+        _custom_primary = st.selectbox(
+            "Y-axis channel", custom_channels,
+            index=0,
+            key="primary_ch_custom_overlay",
+        )
+        fig = make_overlay_chart(custom_channels, _custom_primary, "Custom Overlay",
+                                 time_col, df_view, t_range, mode, chart_height,
+                                 dark=True, smooth_points=smooth_points)
         if fig:
-            st.markdown("### 🔀 Custom Overlay")
             st.plotly_chart(fig, use_container_width=True)
-            st.markdown("---")
+        st.markdown("---")
 
     # ── EGT Full Panel ────────────────────────────────────────────────────────────
     if _cyl_channels:
@@ -2669,15 +2694,31 @@ def show_run_analysis(
 
         st.caption("**EGT over time — all cylinders**")
         _ts_channels = _cyl_channels + ([_avg_egt_ch] if _avg_egt_ch else [])
-        _ts_fig = make_overlay_chart(_ts_channels, "EGT", time_col, df_view, t_range, mode, 320,
-                                     dark=True, global_rpm_max=_global_rpm_max,
-                                     y_min=-10, y_max=_chart_rpm_max, smooth_points=smooth_points)
+        # Default primary to the first Cyl #N channel; fall back to first channel
+        _egt_ts_default = next(
+            (ch for ch in _ts_channels if re.match(r"Cyl #\d", ch)), _ts_channels[0]
+        )
+        _egt_ts_primary = st.selectbox(
+            "Y-axis channel", _ts_channels,
+            index=_ts_channels.index(_egt_ts_default),
+            key="primary_ch_egt_ts",
+        )
+        _ts_fig = make_overlay_chart(_ts_channels, _egt_ts_primary, "EGT",
+                                     time_col, df_view, t_range, mode, 320,
+                                     dark=True, smooth_points=smooth_points)
         if _ts_fig:
             for trace in _ts_fig.data:
+                _override_color = None
                 if trace.name in _cyl_peaks:
-                    trace.line.color = _egt_color(_cyl_peaks[trace.name])
+                    _override_color = _egt_color(_cyl_peaks[trace.name])
                 elif trace.name == _avg_egt_ch:
-                    trace.line.color = "#FECB52"
+                    _override_color = "#FECB52"
+                if _override_color:
+                    if trace.line:
+                        trace.line.color = _override_color
+                    if trace.marker:
+                        trace.marker.color = _override_color
+                if trace.name == _avg_egt_ch and trace.line:
                     trace.line.dash = "dash"
             st.plotly_chart(_ts_fig, use_container_width=True)
 
