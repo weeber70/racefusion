@@ -92,6 +92,46 @@ CHANNEL_UNITS: dict[str, str] = {
     "Nitrous Pres":     "psi",
 }
 
+# ── Predefined full-scale ranges per channel (mirrors RacePak channel scales) ─
+# Used for both normalization and Y-axis bounds.  Fall back to data min/max when
+# a channel is not listed here.
+CHANNEL_RANGES: dict[str, tuple[float, float]] = {
+    # RPM
+    "Engine RPM":       (0, 12000),
+    "DS RPM":           (0, 12000),
+    "MSD Engine RPM":   (0, 12000),
+    "MSD RevLim RPM":   (0, 12000),
+    # Temperatures (°F)
+    "Trans Temp":       (0, 300),
+    "Man Temp":         (0, 300),
+    "L Head Temp":      (0, 300),
+    "Oil Temp":         (0, 300),
+    # EGT (°F)
+    "Cyl #1":           (0, 1500),
+    "Cyl #2":           (0, 1500),
+    "Cyl #3":           (0, 1500),
+    "Cyl #4":           (0, 1500),
+    "Cyl #5":           (0, 1500),
+    "Cyl #6":           (0, 1500),
+    "Cyl #7":           (0, 1500),
+    "Cyl #8":           (0, 1500),
+    "Avg. EGT":         (0, 1500),
+    # Pressure (PSI)
+    "Oil Press":        (0, 150),
+    "Fuel Press":       (0, 15),
+    "Pan Press":        (-5, 5),
+    "Boost Press":      (-20, 30),
+    # G-forces
+    "Accel G":          (-2, 5),
+    "Lateral G":        (-3, 3),
+    # Ratios / percentages
+    "Engine/DS Ratio":  (0, 3),
+    "Conv % Slip":      (-100, 100),
+    # Misc
+    "Logger Volts":     (0, 20),
+    "Fuel Flow":        (0, 15),
+}
+
 # ── Fallback rotation for channels with no designated color ───────────────────
 TRACE_COLORS = [
     "#EF553B",  # red
@@ -140,21 +180,26 @@ def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_ra
         primary_channel = valid[0]
 
     # ── Primary channel: defines the Y-axis ruler ────────────────────────────
-    _pri_raw = df_view[primary_channel].copy()
-    if smooth_points > 1:
-        _pri_raw = _pri_raw.rolling(window=smooth_points, center=True, min_periods=1).mean()
-    if primary_channel in ("Conv % Slip", "Engine/DS Ratio") and "DS RPM" in df_view.columns:
-        _pri_raw = _pri_raw.where(df_view["DS RPM"] >= 100, other=0.0)
-    primary_min = float(_pri_raw.min())
-    primary_max = float(_pri_raw.max())
-    if primary_max == primary_min:          # degenerate / flat channel
-        primary_max = primary_min + 1.0
+    # Predefined range takes priority; fall back to data min/max with a 5% margin.
+    _pri_range = CHANNEL_RANGES.get(primary_channel)
+    if _pri_range is not None:
+        primary_min, primary_max = float(_pri_range[0]), float(_pri_range[1])
+        _y_range = [primary_min, primary_max]
+    else:
+        _pri_raw = df_view[primary_channel].copy()
+        if smooth_points > 1:
+            _pri_raw = _pri_raw.rolling(window=smooth_points, center=True, min_periods=1).mean()
+        if primary_channel in ("Conv % Slip", "Engine/DS Ratio") and "DS RPM" in df_view.columns:
+            _pri_raw = _pri_raw.where(df_view["DS RPM"] >= 100, other=0.0)
+        primary_min = float(_pri_raw.min())
+        primary_max = float(_pri_raw.max())
+        if primary_max == primary_min:
+            primary_max = primary_min + 1.0
+        _margin   = (primary_max - primary_min) * 0.05
+        _y_range  = [primary_min - _margin, primary_max + _margin]
 
     _pri_unit = _ch_unit(primary_channel)
     _y_title  = f"{primary_channel} [{_pri_unit}]" if _pri_unit else primary_channel
-    # Add a 5% margin above and below so traces don't hug the axis edges
-    _margin   = (primary_max - primary_min) * 0.05
-    _y_range  = [primary_min - _margin, primary_max + _margin]
 
     fig = go.Figure()
 
@@ -173,9 +218,13 @@ def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_ra
         if ch in ("Conv % Slip", "Engine/DS Ratio") and "DS RPM" in df_view.columns:
             raw = raw.where(df_view["DS RPM"] >= 100, other=0.0)
 
-        # ── Normalize: channel → 0–1, then map to primary channel's scale ───
-        ch_min = float(raw.min())
-        ch_max = float(raw.max())
+        # ── Normalize: channel → 0–1 using predefined range, then map to primary ─
+        _ch_range = CHANNEL_RANGES.get(ch)
+        if _ch_range is not None:
+            ch_min, ch_max = float(_ch_range[0]), float(_ch_range[1])
+        else:
+            ch_min = float(raw.min())
+            ch_max = float(raw.max())
         if ch_max == ch_min:
             normalized = pd.Series(0.5, index=raw.index)
         else:
