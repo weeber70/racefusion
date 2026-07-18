@@ -92,7 +92,7 @@ st.set_page_config(
 )
 
 # ── Logo loader ───────────────────────────────────────────────────────────────
-def _load_logo_b64(filename: str = "RaceFusion-Logo-V2.png") -> str | None:
+def _load_logo_b64(filename: str = "RaceFusion-Logo-V3.png") -> str | None:
     """Return base64 data-URI for the logo if the file exists next to app.py."""
     p = Path(__file__).parent / filename
     if p.exists():
@@ -102,7 +102,7 @@ def _load_logo_b64(filename: str = "RaceFusion-Logo-V2.png") -> str | None:
         return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
     return None
 
-_LOGO_SRC = _load_logo_b64("RaceFusion-Logo-V2.png")
+_LOGO_SRC = _load_logo_b64("RaceFusion-Logo-V3.png")
 
 _FOOTER_HTML = (
     "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
@@ -313,7 +313,7 @@ if st.session_state["rf_user"] is None:
     apply_login_styles()
 
     # ── Login / Register UI ───────────────────────────────────────────────────
-    _LOGO_SRC_LOGIN = _load_logo_b64("RaceFusion-Logo-V2.png")
+    _LOGO_SRC_LOGIN = _load_logo_b64("RaceFusion-Logo-V3.png")
     if _LOGO_SRC_LOGIN:
         st.markdown(
             f'<img src="{_LOGO_SRC_LOGIN}" style="max-width:600px;width:80%;'
@@ -602,7 +602,7 @@ if _maintenance_on:
         apply_maintenance_styles()
 
         _maint_email = cfg.get("email", "")
-        _maint_logo  = _load_logo_b64("RaceFusion-Logo-V2.png")
+        _maint_logo  = _load_logo_b64("RaceFusion-Logo-V3.png")
 
         st.markdown(
             f"""

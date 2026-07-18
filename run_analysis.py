@@ -5,6 +5,7 @@ Module-level helpers (moved from app.py):
   check_alerts, load_racepak_csv, get_time_col, detect_shift_points,
   calc_rwhp, _build_ai_payload, _fmt, _build_export_row
 """
+import hashlib
 import io
 import json
 import math
@@ -25,6 +26,7 @@ from database import (
     _run_label, list_saved_runs, get_run_videos, add_run_video,
     delete_run_video, get_user_cars, create_car, _get_slip_storage_key,
     extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
+    check_file_hash_duplicate, save_file_hash,
 )
 from config import load_config, save_config
 from weather import (
@@ -433,7 +435,24 @@ def show_run_analysis(
             key=f"create_run_btn_{st.session_state['upload_gen']}",
         )
 
-        if _form_submitted:
+        # ── Run creation logic ────────────────────────────────────────────────────
+        _pending_csv  = None
+        _pending_slip = None
+        _csv_hsave    = None
+        _slp_hsave    = None
+        _do_create    = False
+
+        if st.session_state.get("slip_dup_override"):
+            # User confirmed "Upload Anyway" — restore held file bytes and proceed
+            _pending_csv  = st.session_state.pop("_dup_held_csv", None)
+            _pending_slip = st.session_state.pop("_dup_held_slip", None)
+            _csv_hsave    = st.session_state.pop("_dup_held_csv_hash", None)
+            _slp_hsave    = st.session_state.pop("_dup_held_slip_hash", None)
+            st.session_state.pop("slip_dup_override", None)
+            if _pending_csv is not None or _pending_slip is not None:
+                _do_create = True
+
+        elif _form_submitted:
             # Consume pending file bytes (set by on_change callbacks; safe to pop here).
             # We pop before any processing so the keys are dead for the rest of this render.
             _pending_csv  = st.session_state.pop("_pending_csv", None)
@@ -445,206 +464,265 @@ def show_run_analysis(
                 st.session_state.pop("_pending_csv", None)
                 st.session_state.pop("_pending_timeslip", None)
             else:
-                # ── Resolve car_id ────────────────────────────────────────────────
-                _submit_car_id: str | None = None
-                if _form_selected_car is not None:
-                    _submit_car_id = _form_selected_car["car_id"]
-                    # Apply rename if the user typed a new name in the expander
-                    if _form_new_car_name and _form_new_car_name != _form_selected_car["car_name"] and _sb:
-                        try:
-                            _sb.table("cars").update({"car_name": _form_new_car_name}) \
-                               .eq("car_id", _submit_car_id).execute()
-                        except Exception:
-                            pass
-                elif _form_new_car_name.strip():
-                    # No cars yet — create one now
-                    _submit_car_id = create_car(
-                        current_user,
-                        _form_new_car_name.strip(),
-                        _form_car_number.strip(),
-                    )
+                # ── Hash-based duplicate detection ────────────────────────────────
+                _csv_hash = hashlib.sha256(_pending_csv["bytes"]).hexdigest() if _pending_csv else None
+                _slp_hash = hashlib.sha256(_pending_slip["bytes"]).hexdigest() if _pending_slip else None
+                _csv_dup  = check_file_hash_duplicate(current_user, _csv_hash, "csv_file_hash") if _csv_hash else None
+                _slp_dup  = check_file_hash_duplicate(current_user, _slp_hash, "slip_file_hash") if _slp_hash else None
 
-                # ── Determine run filename ────────────────────────────────────────
-                if _pending_csv is not None:
-                    _new_run_id    = _pending_csv["name"]
-                    _new_csv_bytes = _pending_csv["bytes"]
+                if _csv_dup or _slp_dup:
+                    # Hold file bytes so the override rerun can restore them
+                    st.session_state["_dup_held_csv"]       = _pending_csv
+                    st.session_state["_dup_held_slip"]       = _pending_slip
+                    st.session_state["_dup_held_csv_hash"]  = _csv_hash
+                    st.session_state["_dup_held_slip_hash"] = _slp_hash
+
+                    # Show inline warnings
+                    if _csv_dup:
+                        _cd = _csv_dup
+                        _cd_date  = (_cd.get("created_at") or "")[:10]
+                        _cd_track = _cd.get("track") or "unknown track"
+                        _cd_et    = _cd.get("et")
+                        _cd_et_s  = f"{float(_cd_et):.3f}" if _cd_et else "?"
+                        st.warning(
+                            f"⚠️ This CSV matches an existing run from {_cd_date} "
+                            f"at {_cd_track} (ET: {_cd_et_s}s). Upload anyway?"
+                        )
+                    if _slp_dup:
+                        _sd = _slp_dup
+                        _sd_date  = (_sd.get("created_at") or "")[:10]
+                        _sd_track = _sd.get("track") or "unknown track"
+                        _sd_et    = _sd.get("et")
+                        _sd_et_s  = f"{float(_sd_et):.3f}" if _sd_et else "?"
+                        st.warning(
+                            f"⚠️ This timeslip matches an existing run from {_sd_date} "
+                            f"at {_sd_track} (ET: {_sd_et_s}s). Upload anyway?"
+                        )
+
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        if st.button("Upload Anyway", type="primary", key="slip_dup_confirm"):
+                            st.session_state["slip_dup_override"] = True
+                            st.rerun()
+                    with _dc2:
+                        if st.button("Cancel", key="slip_dup_cancel"):
+                            for _dk in ("_dup_held_csv", "_dup_held_slip",
+                                        "_dup_held_csv_hash", "_dup_held_slip_hash"):
+                                st.session_state.pop(_dk, None)
+                            st.rerun()
+                    st.stop()  # prevent run creation from executing
                 else:
-                    from datetime import datetime as _dt_form
-                    _new_run_id    = f"slip_{_dt_form.now().strftime('%Y%m%d_%H%M%S')}.run"
-                    _new_csv_bytes = None
+                    _csv_hsave = _csv_hash
+                    _slp_hsave = _slp_hash
+                    _do_create = True
 
-                _new_run_rec = {}
-                # Persist the typed car number so the next Create New Run form can
-                # pre-fill from this run instead of the (possibly stale) car profile default.
-                if _form_car_number.strip():
-                    _new_run_rec["car_number"] = _form_car_number.strip()
+        if _do_create:
+            # ── Resolve car_id ────────────────────────────────────────────────
+            _submit_car_id: str | None = None
+            if _form_selected_car is not None:
+                _submit_car_id = _form_selected_car["car_id"]
+                # Apply rename if the user typed a new name in the expander
+                if _form_new_car_name and _form_new_car_name != _form_selected_car["car_name"] and _sb:
+                    try:
+                        _sb.table("cars").update({"car_name": _form_new_car_name}) \
+                           .eq("car_id", _submit_car_id).execute()
+                    except Exception:
+                        pass
+            elif _form_new_car_name.strip():
+                # No cars yet — create one now
+                _submit_car_id = create_car(
+                    current_user,
+                    _form_new_car_name.strip(),
+                    _form_car_number.strip(),
+                )
 
-                # Set run identity BEFORE the status block so it survives any
-                # intermediate rerun that st.status or its children might trigger.
-                # st.rerun() is also called after the block — this is belt-and-braces.
-                st.session_state["active_run_id"] = _new_run_id
-                st.query_params["run"] = _new_run_id
-                st.session_state["_newly_created_run"] = {
-                    "id": _new_run_id,
-                    "label": _run_label(_new_run_id, {}),
-                    "record": {},
-                    "has_csv": _new_csv_bytes is not None,
-                }
+            # ── Determine run filename ────────────────────────────────────────
+            if _pending_csv is not None:
+                _new_run_id    = _pending_csv["name"]
+                _new_csv_bytes = _pending_csv["bytes"]
+            else:
+                from datetime import datetime as _dt_form
+                _new_run_id    = f"slip_{_dt_form.now().strftime('%Y%m%d_%H%M%S')}.run"
+                _new_csv_bytes = None
 
-                with st.status("Creating run…", expanded=True) as _create_status:
+            _new_run_rec = {}
+            # Persist the typed car number so the next Create New Run form can
+            # pre-fill from this run instead of the (possibly stale) car profile default.
+            if _form_car_number.strip():
+                _new_run_rec["car_number"] = _form_car_number.strip()
 
-                    # ── Save CSV ──────────────────────────────────────────────────
-                    if _new_csv_bytes is not None:
-                        _create_status.write("💾 Saving CSV data…")
-                        _stale_key = _get_slip_storage_key(_new_run_id)
-                        if _stale_key:
-                            _delete_slip_from_storage(_stale_key)
-                        save_run_csv(_new_run_id, _new_csv_bytes)
+            # Set run identity BEFORE the status block so it survives any
+            # intermediate rerun that st.status or its children might trigger.
+            # st.rerun() is also called after the block — this is belt-and-braces.
+            st.session_state["active_run_id"] = _new_run_id
+            st.query_params["run"] = _new_run_id
+            st.session_state["_newly_created_run"] = {
+                "id": _new_run_id,
+                "label": _run_label(_new_run_id, {}),
+                "record": {},
+                "has_csv": _new_csv_bytes is not None,
+            }
 
-                    save_run(_new_run_id, _new_run_rec, car_id=_submit_car_id)
+            with st.status("Creating run…", expanded=True) as _create_status:
 
-                    # ── Upload + scan timeslip ────────────────────────────────────
-                    if _pending_slip is not None:
-                        _create_status.write("📤 Uploading timeslip…")
-                        _sl_bytes = _pending_slip["bytes"]
-                        _sl_ext   = _pending_slip["name"].rsplit(".", 1)[-1].lower()
-                        _sl_stem  = re.sub(r"[^\w\-]", "_", Path(_new_run_id).stem)
-                        _sl_s_key = f"{current_user}/{_sl_stem}.{_sl_ext}"
-                        _sl_mime  = {"jpg":"image/jpeg","jpeg":"image/jpeg",
-                                     "png":"image/png","webp":"image/webp"}.get(_sl_ext, "image/jpeg")
-                        if _sb:
-                            try:
-                                _sb.storage.from_("timeslips").upload(
-                                    path=_sl_s_key, file=_sl_bytes,
-                                    file_options={"upsert": "true", "content-type": _sl_mime},
-                                )
-                            except Exception as _sl_se:
-                                st.warning(f"Timeslip upload failed: {_sl_se}")
-                        _new_run_rec["timeslip_storage_key"] = _sl_s_key
+                # ── Save CSV ──────────────────────────────────────────────────
+                if _new_csv_bytes is not None:
+                    _create_status.write("💾 Saving CSV data…")
+                    _stale_key = _get_slip_storage_key(_new_run_id)
+                    if _stale_key:
+                        _delete_slip_from_storage(_stale_key)
+                    save_run_csv(_new_run_id, _new_csv_bytes)
 
-                        if not _form_car_number.strip():
-                            _create_status.write(
-                                "ℹ️ Enter your car number above to scan timeslips. "
-                                "RaceFusion needs your car number to identify your lane on the timeslip."
+                save_run(_new_run_id, _new_run_rec, car_id=_submit_car_id)
+
+                # ── Upload + scan timeslip ────────────────────────────────────
+                if _pending_slip is not None:
+                    _create_status.write("📤 Uploading timeslip…")
+                    _sl_bytes = _pending_slip["bytes"]
+                    _sl_ext   = _pending_slip["name"].rsplit(".", 1)[-1].lower()
+                    _sl_stem  = re.sub(r"[^\w\-]", "_", Path(_new_run_id).stem)
+                    _sl_s_key = f"{current_user}/{_sl_stem}.{_sl_ext}"
+                    _sl_mime  = {"jpg":"image/jpeg","jpeg":"image/jpeg",
+                                 "png":"image/png","webp":"image/webp"}.get(_sl_ext, "image/jpeg")
+                    if _sb:
+                        try:
+                            _sb.storage.from_("timeslips").upload(
+                                path=_sl_s_key, file=_sl_bytes,
+                                file_options={"upsert": "true", "content-type": _sl_mime},
                             )
-                        elif api_key:
-                            _create_status.write("🎫 Scanning timeslip…")
-                            try:
-                                # _sl_bytes comes from _pending_slip["bytes"], stored by the
-                                # _on_slip_upload on_change callback only when the uploaded
-                                # file object is not None — so bytes are guaranteed non-empty here.
-                                _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, _form_car_number)
-                                # Track which car number was used so the run-view rescan
-                                # guard can tell whether it needs to retry or not.
-                                _scan_result["_scanned_with"] = _form_car_number.strip()
+                        except Exception as _sl_se:
+                            st.warning(f"Timeslip upload failed: {_sl_se}")
+                    _new_run_rec["timeslip_storage_key"] = _sl_s_key
 
-                                if _scan_result.get("car_found") is False:
-                                    _new_run_rec["timeslip"] = _scan_result
-                                    _create_status.write(
-                                        f"ℹ️ Car number **{_form_car_number.strip()}** wasn't found on "
-                                        "this timeslip — the track may have printed a different number. "
-                                        "You can re-scan from the run view after confirming your car number."
-                                    )
-                                else:
-                                    _new_run_rec["timeslip"] = _scan_result
+                    if not _form_car_number.strip():
+                        _create_status.write(
+                            "ℹ️ Enter your car number above to scan timeslips. "
+                            "RaceFusion needs your car number to identify your lane on the timeslip."
+                        )
+                    elif api_key:
+                        _create_status.write("🎫 Scanning timeslip…")
+                        try:
+                            # _sl_bytes comes from _pending_slip["bytes"], stored by the
+                            # _on_slip_upload on_change callback only when the uploaded
+                            # file object is not None — so bytes are guaranteed non-empty here.
+                            _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, _form_car_number)
+                            # Track which car number was used so the run-view rescan
+                            # guard can tell whether it needs to retry or not.
+                            _scan_result["_scanned_with"] = _form_car_number.strip()
 
-                                    # Auto-populate result from scanned slip (only if not manually set)
-                                    _scanned_result = _normalize_slip_result(_scan_result.get("result"))
-                                    if _scanned_result:
-                                        _rd_auto = _new_run_rec.get("run_details") or {}
-                                        if not _rd_auto.get("result"):
-                                            _rd_auto["result"] = _scanned_result
-                                            _new_run_rec["run_details"] = _rd_auto
+                            if _scan_result.get("car_found") is False:
+                                _new_run_rec["timeslip"] = _scan_result
+                                _create_status.write(
+                                    f"ℹ️ Car number **{_form_car_number.strip()}** wasn't found on "
+                                    "this timeslip — the track may have printed a different number. "
+                                    "You can re-scan from the run view after confirming your car number."
+                                )
+                            else:
+                                _new_run_rec["timeslip"] = _scan_result
 
-                                    # ── Fetch weather ─────────────────────────────────
-                                    _slip_date = _scan_result.get("date")
-                                    if _slip_date:
-                                        _slip_hour = 12
-                                        if _scan_result.get("time"):
-                                            try:
-                                                _slip_hour = int(str(_scan_result["time"]).split(":")[0])
-                                            except Exception:
-                                                _slip_hour = 12
-                                        _wx_lat, _wx_lon, _wx_label = None, None, ""
-                                        _tname = _scan_result.get("track_name", "")
-                                        _tloc  = _scan_result.get("track_location", "")
-                                        if _tname or _tloc:
-                                            _create_status.write(f"📍 Looking up {_tname or _tloc}…")
-                                            _tk = lookup_track(_tname, _tloc)
-                                            if _tk:
-                                                _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
-                                                # Auto-save track location to user config
-                                                cfg["location_name"]  = _tname or _tloc
-                                                cfg["location_label"] = _tk["display_name"]
-                                                cfg["lat"] = _tk["lat"]
-                                                cfg["lon"] = _tk["lon"]
-                                                cfg["elev_ft"] = _tk.get("elev_ft")
-                                                save_config(cfg)
-                                        if _wx_lat is None and cfg.get("lat"):
-                                            _wx_lat  = cfg["lat"]
-                                            _wx_lon  = cfg["lon"]
-                                            _wx_label = cfg.get("location_label", "")
-                                        if _wx_lat is not None:
-                                            _create_status.write("🌤️ Fetching weather…")
-                                            try:
-                                                _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
-                                                _da = calc_density_altitude(
-                                                    _wx.get("temperature_f"),
-                                                    _wx.get("pressure_hpa"),
-                                                )
-                                                if _da is not None:
-                                                    _wx["density_alt_ft"] = round(_da)
-                                                _new_run_rec["weather"]          = _wx
-                                                _new_run_rec["weather_date"]     = _slip_date
-                                                _new_run_rec["weather_location"] = _wx_label
-                                            except Exception as _wx_e:
-                                                st.warning(f"Weather fetch failed: {_wx_e}")
-                            except Exception as _scan_e:
-                                st.warning(f"Timeslip scan failed: {_scan_e}")
+                                # Auto-populate result from scanned slip (only if not manually set)
+                                _scanned_result = _normalize_slip_result(_scan_result.get("result"))
+                                if _scanned_result:
+                                    _rd_auto = _new_run_rec.get("run_details") or {}
+                                    if not _rd_auto.get("result"):
+                                        _rd_auto["result"] = _scanned_result
+                                        _new_run_rec["run_details"] = _rd_auto
 
-                        save_run(_new_run_id, _new_run_rec)
+                                # ── Fetch weather ─────────────────────────────────
+                                _slip_date = _scan_result.get("date")
+                                if _slip_date:
+                                    _slip_hour = 12
+                                    if _scan_result.get("time"):
+                                        try:
+                                            _slip_hour = int(str(_scan_result["time"]).split(":")[0])
+                                        except Exception:
+                                            _slip_hour = 12
+                                    _wx_lat, _wx_lon, _wx_label = None, None, ""
+                                    _tname = _scan_result.get("track_name", "")
+                                    _tloc  = _scan_result.get("track_location", "")
+                                    if _tname or _tloc:
+                                        _create_status.write(f"📍 Looking up {_tname or _tloc}…")
+                                        _tk = lookup_track(_tname, _tloc)
+                                        if _tk:
+                                            _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
+                                            # Auto-save track location to user config
+                                            cfg["location_name"]  = _tname or _tloc
+                                            cfg["location_label"] = _tk["display_name"]
+                                            cfg["lat"] = _tk["lat"]
+                                            cfg["lon"] = _tk["lon"]
+                                            cfg["elev_ft"] = _tk.get("elev_ft")
+                                            save_config(cfg)
+                                    if _wx_lat is None and cfg.get("lat"):
+                                        _wx_lat  = cfg["lat"]
+                                        _wx_lon  = cfg["lon"]
+                                        _wx_label = cfg.get("location_label", "")
+                                    if _wx_lat is not None:
+                                        _create_status.write("🌤️ Fetching weather…")
+                                        try:
+                                            _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
+                                            _da = calc_density_altitude(
+                                                _wx.get("temperature_f"),
+                                                _wx.get("pressure_hpa"),
+                                            )
+                                            if _da is not None:
+                                                _wx["density_alt_ft"] = round(_da)
+                                            _new_run_rec["weather"]          = _wx
+                                            _new_run_rec["weather_date"]     = _slip_date
+                                            _new_run_rec["weather_location"] = _wx_label
+                                        except Exception as _wx_e:
+                                            st.warning(f"Weather fetch failed: {_wx_e}")
+                        except Exception as _scan_e:
+                            st.warning(f"Timeslip scan failed: {_scan_e}")
 
-                    # ── Save pre-filled videos ────────────────────────────────────
-                    for _vi, _fv in enumerate(_form_videos):
-                        if extract_youtube_id(_fv["url"]):
-                            add_run_video(_new_run_id, current_user, _fv["url"], _fv["label"],
-                                          display_order=_vi + 1)
+                    save_run(_new_run_id, _new_run_rec)
 
-                    _create_status.update(label="✅ Run created!", state="complete")
+                # ── Save pre-filled videos ────────────────────────────────────
+                for _vi, _fv in enumerate(_form_videos):
+                    if extract_youtube_id(_fv["url"]):
+                        add_run_video(_new_run_id, current_user, _fv["url"], _fv["label"],
+                                      display_order=_vi + 1)
 
-                # Update cache with full record now that the status block has finished
-                # (timeslip scan, weather fetch, etc. have populated _new_run_rec).
-                st.session_state["_newly_created_run"]["record"] = _new_run_rec
-                st.session_state["_newly_created_run"]["label"]  = _run_label(_new_run_id, _new_run_rec)
-                # active_run_id and query_params["run"] were already set before the status block.
-                # Increment key gen AND explicitly purge all old form widget data from session state
-                _old_gen  = st.session_state["upload_gen"]
-                _old_inst = st.session_state.get("_create_run_instance_key", 0)
-                st.session_state["upload_gen"] = _old_gen + 1
-                _stale_keys = [
-                    f"csv_uploader_{_old_inst}",   # file-uploader uses _create_run_instance_key
-                    f"slip_uploader_{_old_inst}",  # ditto
-                    f"create_car_num_{_old_gen}",
-                    f"create_run_type_{_old_gen}",
-                    f"create_note_{_old_gen}",
-                    f"create_run_btn_{_old_gen}",
-                    "_last_uploaded_csv",
-                    "_pending_csv",
-                    "_pending_timeslip",
-                ]
-                # Clear video URL/label fields and reset the row counter
-                _old_vid_count = st.session_state.get("_create_video_row_count", 3)
-                st.session_state["_create_video_row_count"] = 3
-                for _vi in range(_old_vid_count):
-                    _stale_keys += [f"video_url_{_vi}", f"video_label_{_vi}"]
-                _stale_keys.append(f"add_video_btn_{_old_gen}")
-                for _stale_key in _stale_keys:
-                    st.session_state.pop(_stale_key, None)
-                # Belt-and-suspenders: explicitly clear pending keys after stale-key
-                # sweep in case a callback re-set them during this render cycle.
-                st.session_state.pop("_pending_csv", None)
-                st.session_state.pop("_pending_timeslip", None)
-                st.rerun()
+                # ── Persist file hashes ───────────────────────────────────────
+                if _csv_hsave:
+                    save_file_hash(_new_run_id, "csv_file_hash", _csv_hsave)
+                if _slp_hsave:
+                    save_file_hash(_new_run_id, "slip_file_hash", _slp_hsave)
+
+                _create_status.update(label="✅ Run created!", state="complete")
+
+            # Update cache with full record now that the status block has finished
+            # (timeslip scan, weather fetch, etc. have populated _new_run_rec).
+            st.session_state["_newly_created_run"]["record"] = _new_run_rec
+            st.session_state["_newly_created_run"]["label"]  = _run_label(_new_run_id, _new_run_rec)
+            # active_run_id and query_params["run"] were already set before the status block.
+            # Increment key gen AND explicitly purge all old form widget data from session state
+            _old_gen  = st.session_state["upload_gen"]
+            _old_inst = st.session_state.get("_create_run_instance_key", 0)
+            st.session_state["upload_gen"] = _old_gen + 1
+            _stale_keys = [
+                f"csv_uploader_{_old_inst}",   # file-uploader uses _create_run_instance_key
+                f"slip_uploader_{_old_inst}",  # ditto
+                f"create_car_num_{_old_gen}",
+                f"create_run_type_{_old_gen}",
+                f"create_note_{_old_gen}",
+                f"create_run_btn_{_old_gen}",
+                "_last_uploaded_csv",
+                "_pending_csv",
+                "_pending_timeslip",
+            ]
+            # Clear video URL/label fields and reset the row counter
+            _old_vid_count = st.session_state.get("_create_video_row_count", 3)
+            st.session_state["_create_video_row_count"] = 3
+            for _vi in range(_old_vid_count):
+                _stale_keys += [f"video_url_{_vi}", f"video_label_{_vi}"]
+            _stale_keys.append(f"add_video_btn_{_old_gen}")
+            for _stale_key in _stale_keys:
+                st.session_state.pop(_stale_key, None)
+            # Belt-and-suspenders: explicitly clear pending keys after stale-key
+            # sweep in case a callback re-set them during this render cycle.
+            st.session_state.pop("_pending_csv", None)
+            st.session_state.pop("_pending_timeslip", None)
+            st.rerun()
 
         st.markdown(
             "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"

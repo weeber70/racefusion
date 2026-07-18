@@ -442,6 +442,56 @@ def _delete_run_files(csv_filename: str):
         st.warning(f"Delete failed: {e}")
 
 
+def check_file_hash_duplicate(user_id: str, hash_value: str, field: str) -> dict | None:
+    """Check if a file hash already exists for this user. field is 'csv_file_hash' or 'slip_file_hash'.
+    Returns the matching run dict or None."""
+    if not _sb or not hash_value:
+        return None
+    try:
+        rows = (
+            _sb.table("runs")
+            .select("id,created_at,run_data,csv_file_hash,slip_file_hash")
+            .eq("username", user_id)
+            .eq(field, hash_value)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not rows:
+            return None
+        row  = rows[0]
+        rec  = row.get("run_data") or {}
+        slip = rec.get("timeslip") or {}
+        track = slip.get("track_name") or slip.get("track_location") or ""
+        try:
+            et = float(slip.get("ft_1320") or 0) or None
+        except (TypeError, ValueError):
+            et = None
+        return {
+            "id":             row.get("id"),
+            "created_at":     row.get("created_at", ""),
+            "track":          track,
+            "et":             et,
+            "csv_file_hash":  row.get("csv_file_hash"),
+            "slip_file_hash": row.get("slip_file_hash"),
+        }
+    except Exception:
+        return None
+
+
+def save_file_hash(run_id: str, field: str, hash_value: str) -> None:
+    """Update a run record with a file hash."""
+    if not _sb or not run_id or not hash_value:
+        return
+    username = st.session_state.get("rf_user", "")
+    try:
+        _sb.table("runs").update({field: hash_value, "updated_at": "now()"}).eq(
+            "csv_filename", run_id
+        ).eq("username", username).execute()
+    except Exception:
+        pass
+
+
 def _rdp_load_run_history(username: str) -> list[dict]:
     """Return all runs for username that have both a valid ET and a DA."""
     # Lazy import to avoid circular dependency (weather.py imports _sb from database.py)
