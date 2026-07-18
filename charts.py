@@ -159,8 +159,50 @@ def _ch_unit(ch: str) -> str:
     return CHANNEL_UNITS.get(ch, "")
 
 
+def _infer_channel_range(ch_name: str) -> "tuple | None":
+    """Pattern-based range inference for channels not in CHANNEL_RANGES."""
+    name = ch_name.lower()
+    if any(x in name for x in ["rpm"]):
+        return (0, 12000)
+    if any(x in name for x in ["egt", "exhaust"]):
+        return (0, 1500)
+    if any(x in name for x in ["cyl #", "cylinder"]):
+        return (0, 1500)
+    if any(x in name for x in ["temp", "temperature"]):
+        return (0, 300)
+    if any(x in name for x in ["press", "pressure"]):
+        return (0, 150)
+    if any(x in name for x in ["volt", "voltage"]):
+        return (0, 20)
+    if any(x in name for x in ["accel g", "lateral g"]):
+        return (-3, 5)
+    if any(x in name for x in ["fuel flow"]):
+        return (0, 15)
+    if any(x in name for x in ["slip", "conv"]):
+        return (-100, 100)
+    if any(x in name for x in ["ratio"]):
+        return (0, 3)
+    return None
+
+
+def _resolve_range(ch: str, custom_ranges: "dict | None" = None) -> "tuple | None":
+    """4-level range resolution: custom_ranges → CHANNEL_RANGES → pattern → None.
+
+    User-defined ranges take highest priority so they can override any built-in.
+    Returns (min, max) or None (caller falls back to data-driven bounds).
+    """
+    if custom_ranges:
+        r = custom_ranges.get(ch)
+        if r is not None:
+            return (float(r[0]), float(r[1]))
+    r = CHANNEL_RANGES.get(ch)
+    if r is not None:
+        return r
+    return _infer_channel_range(ch)
+
+
 def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_range, mode, height,
-                       dark=True, smooth_points=1):
+                       dark=True, smooth_points=1, custom_ranges=None):
     """RacePak DataLink-style overlay chart — primary-channel Y-axis.
 
     Every channel is normalized to its own 0–100% range, then mapped onto the
@@ -180,8 +222,8 @@ def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_ra
         primary_channel = valid[0]
 
     # ── Primary channel: defines the Y-axis ruler ────────────────────────────
-    # Predefined range takes priority; fall back to data min/max with a 5% margin.
-    _pri_range = CHANNEL_RANGES.get(primary_channel)
+    # Resolution order: CHANNEL_RANGES → pattern → custom_ranges → data min/max.
+    _pri_range = _resolve_range(primary_channel, custom_ranges)
     if _pri_range is not None:
         primary_min, primary_max = float(_pri_range[0]), float(_pri_range[1])
         _y_range = [primary_min, primary_max]
@@ -218,8 +260,8 @@ def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_ra
         if ch in ("Conv % Slip", "Engine/DS Ratio") and "DS RPM" in df_view.columns:
             raw = raw.where(df_view["DS RPM"] >= 100, other=0.0)
 
-        # ── Normalize: channel → 0–1 using predefined range, then map to primary ─
-        _ch_range = CHANNEL_RANGES.get(ch)
+        # ── Normalize: channel → 0–1 using resolved range, then map to primary ─
+        _ch_range = _resolve_range(ch, custom_ranges)
         if _ch_range is not None:
             ch_min, ch_max = float(_ch_range[0]), float(_ch_range[1])
         else:

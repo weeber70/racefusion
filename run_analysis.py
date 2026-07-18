@@ -27,6 +27,7 @@ from database import (
     delete_run_video, get_user_cars, create_car, _get_slip_storage_key,
     extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
     check_file_hash_duplicate, save_file_hash,
+    load_channel_ranges, save_channel_range,
 )
 from config import load_config, save_config
 from weather import (
@@ -36,7 +37,7 @@ from weather import (
 )
 from charts import (
     make_overlay_chart, TRACE_COLORS, RPM_CHANNEL_NAMES,
-    CHANNEL_COLORS, CHANNEL_UNITS,
+    CHANNEL_COLORS, CHANNEL_UNITS, CHANNEL_RANGES, _infer_channel_range,
 )
 from timeslip import correct_image_orientation, scan_timeslip, _normalize_slip_result
 
@@ -752,7 +753,8 @@ def show_run_analysis(
     _active_csv_bytes = load_run_csv_bytes(csv_name) if (_run_meta_now and _run_meta_now["has_csv"]) else None
     _csv_available    = _active_csv_bytes is not None
 
-    _ch_prefs = cfg.get("channel_prefs", {})
+    _ch_prefs     = cfg.get("channel_prefs", {})
+    custom_ranges = load_channel_ranges(current_user)   # user-defined channel scales
     if _csv_available:
         df = load_racepak_csv(_active_csv_bytes)
         time_col = get_time_col(df)
@@ -952,6 +954,82 @@ def show_run_analysis(
                         st.rerun()
             else:
                 st.caption("No rules set yet.")
+
+            st.divider()
+            st.markdown("**Custom Channel Scales**")
+
+            # ── Classify channels: Known (predefined/inferred) vs Unknown ────────
+            # Unknown channels fall back to data min/max — unreliable for comparison.
+            _unknown_chs: list[str] = []
+            if _all_channels_full:
+                for _ch0 in _all_channels_full:
+                    if (
+                        not CHANNEL_RANGES.get(_ch0)
+                        and not _infer_channel_range(_ch0)
+                        and _ch0 not in custom_ranges
+                    ):
+                        _unknown_chs.append(_ch0)
+
+            # Alert: unknown channels that haven't been given a custom scale
+            if _unknown_chs:
+                _unk_lines = "\n".join(f"- {c}" for c in _unknown_chs[:7])
+                _unk_more  = f"\n- … and {len(_unknown_chs) - 7} more" if len(_unknown_chs) > 7 else ""
+                st.warning(
+                    "**No known scale for these channels — using data range:**\n\n"
+                    + _unk_lines + _unk_more
+                    + "\n\n*Set scales for them below ↓*"
+                )
+
+            # ── List existing custom scales ───────────────────────────────────────
+            if custom_ranges:
+                for _rch, _rrng in list(custom_ranges.items()):
+                    _sl1, _sl2 = st.columns([3, 1])
+                    _sl1.caption(f"**{_rch}**: {_rrng[0]:g} – {_rrng[1]:g}")
+                    if _sl2.button("🗑️", key=f"del_range_{_rch}"):
+                        _cr = dict(cfg.get("channel_ranges", {}))
+                        _cr.pop(_rch, None)
+                        cfg["channel_ranges"] = _cr
+                        save_config(cfg)
+                        custom_ranges = {k: v for k, v in custom_ranges.items() if k != _rch}
+                        st.rerun()
+            else:
+                st.caption("No custom scales set yet.")
+
+            # ── Add / Edit Scale form — auto-opens when unknown channels exist ───
+            with st.expander("Add / Edit Scale", expanded=bool(_unknown_chs)):
+                if _all_channels_full:
+                    # Selectbox from actual CSV channels; pre-select first unknown
+                    _default_scale_idx = 0
+                    if _unknown_chs:
+                        try:
+                            _default_scale_idx = _all_channels_full.index(_unknown_chs[0])
+                        except ValueError:
+                            _default_scale_idx = 0
+                    _scale_ch = st.selectbox(
+                        "Channel", _all_channels_full,
+                        index=_default_scale_idx,
+                        key="scale_ch_select",
+                    )
+                else:
+                    # No CSV open — fall back to free-text entry
+                    _scale_ch = st.text_input(
+                        "Channel name", key="scale_ch_name",
+                        placeholder="e.g. Boost Press",
+                    )
+                _sc1, _sc2 = st.columns(2)
+                _scale_min = _sc1.number_input("Min", value=0.0, step=1.0, key="scale_min_val")
+                _scale_max = _sc2.number_input("Max", value=100.0, step=1.0, key="scale_max_val")
+                if st.button("💾 Save Scale", key="save_scale_btn"):
+                    _scale_ch_clean = (_scale_ch or "").strip()
+                    if not _scale_ch_clean:
+                        st.warning("Enter a channel name.")
+                    elif _scale_max == _scale_min:
+                        st.warning("Min and Max must be different.")
+                    else:
+                        save_channel_range(current_user, _scale_ch_clean, _scale_min, _scale_max)
+                        cfg.setdefault("channel_ranges", {})[_scale_ch_clean] = [_scale_min, _scale_max]
+                        save_config(cfg)
+                        st.rerun()
 
         st.markdown("---")
 
@@ -2531,7 +2609,7 @@ def show_run_analysis(
         )
 
         fig = make_overlay_chart(grp_channels, _primary_ch, grp, time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, smooth_points=smooth_points)
+                                 dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         st.markdown("---")
@@ -2546,7 +2624,7 @@ def show_run_analysis(
         )
         fig = make_overlay_chart(custom_channels, _custom_primary, "Custom Overlay",
                                  time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, smooth_points=smooth_points)
+                                 dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         st.markdown("---")
@@ -2705,7 +2783,7 @@ def show_run_analysis(
         )
         _ts_fig = make_overlay_chart(_ts_channels, _egt_ts_primary, "EGT",
                                      time_col, df_view, t_range, mode, 320,
-                                     dark=True, smooth_points=smooth_points)
+                                     dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
         if _ts_fig:
             for trace in _ts_fig.data:
                 _override_color = None

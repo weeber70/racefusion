@@ -492,6 +492,54 @@ def save_file_hash(run_id: str, field: str, hash_value: str) -> None:
         pass
 
 
+def load_channel_ranges(user_id: str) -> dict:
+    """Load user-configured channel ranges from user_configs table.
+
+    Returns {channel_name: (min, max)}.  Stored under config["channel_ranges"]
+    in the same user_configs row that load_config() reads — no schema change.
+    """
+    if not _sb:
+        return {}
+    try:
+        rows = (
+            _sb.table("user_configs")
+            .select("config")
+            .eq("username", user_id)
+            .execute()
+            .data
+        )
+        if not rows:
+            return {}
+        raw = (rows[0].get("config") or {}).get("channel_ranges", {})
+        return {ch: (float(v[0]), float(v[1])) for ch, v in raw.items() if len(v) >= 2}
+    except Exception:
+        return {}
+
+
+def save_channel_range(user_id: str, channel_name: str, ch_min: float, ch_max: float) -> None:
+    """Save a custom channel range to user_configs under config["channel_ranges"]."""
+    if not _sb:
+        return
+    try:
+        rows = (
+            _sb.table("user_configs")
+            .select("config")
+            .eq("username", user_id)
+            .execute()
+            .data
+        )
+        config = (rows[0].get("config") or {}) if rows else {}
+        ranges = config.get("channel_ranges", {})
+        ranges[channel_name] = [ch_min, ch_max]
+        config["channel_ranges"] = ranges
+        _sb.table("user_configs").upsert(
+            {"username": user_id, "config": config, "updated_at": "now()"},
+            on_conflict="username",
+        ).execute()
+    except Exception:
+        pass
+
+
 def _rdp_load_run_history(username: str) -> list[dict]:
     """Return all runs for username that have both a valid ET and a DA."""
     # Lazy import to avoid circular dependency (weather.py imports _sb from database.py)
