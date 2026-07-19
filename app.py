@@ -49,6 +49,7 @@ from season_summary import show_season_summary
 from race_day_predictor import show_race_day_predictor
 from run_manager import show_run_manager
 from instructions import show_instructions
+from car_profile import show_car_profile
 from run_analysis import (
     show_run_analysis,
     load_racepak_csv, get_time_col, check_alerts, detect_shift_points, calc_rwhp,
@@ -477,7 +478,7 @@ for _k, _v in {
     "active_run_id":           None,        # canonical active run filename
     "upload_gen":              0,           # incremented by Save & Close to reset form state
     "_create_run_instance_key": 0,          # incremented each time user enters Create New Run form
-    "current_page":            "dashboard", # "dashboard" | "predictor" | "season" | "upgrade" | "run_manager" | "instructions"
+    "current_page":            "dashboard", # "dashboard" | "predictor" | "season" | "upgrade" | "run_manager" | "instructions" | "car_profile"
 }.items():
     if _k not in st.session_state:
         # Restore current_page from URL on refresh
@@ -769,6 +770,11 @@ if _cur_page != "instructions":
         st.session_state["current_page"] = "instructions"
         st.query_params["p"] = "instructions"
         st.rerun()
+if _cur_page != "car_profile":
+    if st.sidebar.button("🔧 Car Profile", use_container_width=True, key="nav_to_car_profile"):
+        st.session_state["current_page"] = "car_profile"
+        st.query_params["p"] = "car_profile"
+        st.rerun()
 if _cur_page != "run_manager":
     if st.sidebar.button("🗂️ Run Manager", use_container_width=True, key="nav_to_run_manager"):
         st.session_state["current_page"] = "run_manager"
@@ -798,143 +804,8 @@ if _cur_page != "upgrade":
 
 st.sidebar.markdown("---")
 
-# ── Car Profile (static specs, saved to config) ───────────────────────────────
-st.sidebar.markdown("### 🏎️ Car Profile")
+# ── Car number & weight (used downstream for timeslip scanning and RWHP) ──────
 car_number_input = cfg.get("car_number", "")
-
-with st.sidebar.expander("Car specs", expanded=False):
-    st.caption("Fill in once — included in every AI analysis.")
-
-    # ── Weight ────────────────────────────────────────────────────────────────
-    _cp_weight = st.number_input(
-        "Car weight with driver (lbs)", min_value=500, max_value=10000,
-        value=int(cfg.get("car_weight_lbs", 2500)), step=50, key="cp_weight",
-        help="Used for G-force cross-check and RWHP estimate.",
-    )
-
-    # ── Sanctioning Body & Class ──────────────────────────────────────────────
-    st.markdown("**Sanctioning Body & Class**")
-    _cp_sanction = st.text_input(
-        "Sanctioning Body", value=cfg.get("sanctioning_body", ""),
-        placeholder="e.g. NHRA, IHRA, NMCA, PDRA, local track",
-        key="cp_sanction",
-        help="The organization whose rulebook governs this car. Used by the AI to apply correct class rules and legal limits.",
-    )
-    _cp_class_name = st.text_input(
-        "Class Name", value=cfg.get("class_name", ""),
-        placeholder="e.g. Top Alcohol Dragster, Super Gas, Pro Mod, Bracket",
-        key="cp_class_name",
-        help="The exact class name. The AI will look up index, dial-in requirements, and rulebook restrictions for this class.",
-    )
-
-    # ── Engine & Fuel ─────────────────────────────────────────────────────────
-    st.markdown("**Engine & Fuel**")
-    _cp_eng  = st.text_input(
-        "Engine", value=cfg.get("engine_desc", ""),
-        placeholder="e.g. 540 BBC, 565 SBC", key="cp_eng",
-    )
-    _fuel_opts = ["", "Gasoline", "Methanol", "Nitromethane"]
-    _cp_fuel = st.selectbox(
-        "Fuel type", options=_fuel_opts, key="cp_fuel",
-        index=_fuel_opts.index(cfg.get("fuel_type", ""))
-              if cfg.get("fuel_type", "") in _fuel_opts else 0,
-    )
-    _cp_carb = st.text_input(
-        "Carburetor / Fuel system", value=cfg.get("carb_desc", ""),
-        placeholder="e.g. 2× 1050 Dominator / EFI", key="cp_carb",
-    )
-
-    # ── Blower ────────────────────────────────────────────────────────────────
-    st.markdown("**Blower**")
-    _cp_bl_col1, _cp_bl_col2 = st.columns(2)
-    _cp_blower_type  = _cp_bl_col1.selectbox(
-        "Type", options=["", "Roots", "Screw"], key="cp_blower_type",
-        index=["", "Roots", "Screw"].index(cfg.get("blower_type", ""))
-              if cfg.get("blower_type", "") in ["", "Roots", "Screw"] else 0,
-    )
-    _cp_blower_style = _cp_bl_col2.selectbox(
-        "Style", options=["", "Standard", "Hi-Helix"], key="cp_blower_style",
-        index=["", "Standard", "Hi-Helix"].index(cfg.get("blower_style", ""))
-              if cfg.get("blower_style", "") in ["", "Standard", "Hi-Helix"] else 0,
-    )
-    _cp_blower_size  = st.text_input(
-        "Blower size", value=cfg.get("blower_size", ""),
-        placeholder="e.g. 14-71, 10-71, 8-71", key="cp_blower_size",
-    )
-
-    # ── Drivetrain ────────────────────────────────────────────────────────────
-    st.markdown("**Drivetrain**")
-    _cp_conv  = st.text_input(
-        "Torque Converter", value=cfg.get("converter_desc", ""),
-        placeholder="e.g. Neal Chance 3600 stall, lock-up", key="cp_conv",
-    )
-    _cp_trans = st.text_input(
-        "Transmission", value=cfg.get("transmission", ""),
-        placeholder="e.g. Powerglide, TH400, Jerico 4-speed", key="cp_trans",
-    )
-    _cp_num_gears = st.number_input(
-        "Number of forward gears", min_value=1, max_value=6,
-        value=int(cfg.get("num_gears", 2)), step=1, key="cp_num_gears",
-    )
-    _cp_gear_ratios = {}
-    _gear_cols = st.columns(min(int(_cp_num_gears), 3))
-    _gear_labels = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
-    _saved_ratios = cfg.get("gear_ratios", {})
-    for _gi in range(int(_cp_num_gears)):
-        _col = _gear_cols[_gi % len(_gear_cols)]
-        _cp_gear_ratios[str(_gi + 1)] = _col.text_input(
-            _gear_labels[_gi], value=_saved_ratios.get(str(_gi + 1), ""),
-            placeholder="e.g. 1.76", key=f"cp_gear_{_gi+1}",
-        )
-    _cp_rear_ratio = st.text_input(
-        "Rear end ratio", value=cfg.get("rear_gear_ratio", ""),
-        placeholder="e.g. 4.11", key="cp_rear_ratio",
-    )
-
-    # ── Suspension, Tires & Weight ────────────────────────────────────────────
-    st.markdown("**Suspension, Tires & Weight**")
-    _susp_opts = ["", "Hardtail", "Shocks / Leaf", "Shocks / Coilover", "Four-link"]
-    _cp_susp = st.selectbox(
-        "Suspension type", options=_susp_opts, key="cp_susp",
-        index=_susp_opts.index(cfg.get("suspension_type", ""))
-              if cfg.get("suspension_type", "") in _susp_opts else 0,
-    )
-    _cp_tire = st.text_input(
-        "Rear tire size", value=cfg.get("tire_size", ""),
-        placeholder="e.g. 33×10.5 ET, 275/60-15", key="cp_tire",
-    )
-
-    _cp_notes = st.text_area(
-        "Additional notes", value=cfg.get("car_notes", ""),
-        placeholder="Cam specs, injector size, anything else the AI tuner should know…",
-        height=70, key="cp_notes",
-    )
-
-    _cp_vals = {
-        "sanctioning_body": _cp_sanction,
-        "class_name":       _cp_class_name,
-        "engine_desc":    _cp_eng,
-        "fuel_type":      _cp_fuel,
-        "carb_desc":      _cp_carb,
-        "blower_type":    _cp_blower_type,
-        "blower_style":   _cp_blower_style,
-        "blower_size":    _cp_blower_size,
-        "converter_desc": _cp_conv,
-        "transmission":   _cp_trans,
-        "num_gears":      int(_cp_num_gears),
-        "gear_ratios":    _cp_gear_ratios,
-        "rear_gear_ratio":_cp_rear_ratio,
-        "suspension_type":_cp_susp,
-        "tire_size":      _cp_tire,
-        "car_weight_lbs": int(_cp_weight),
-        "car_notes":      _cp_notes,
-    }
-    _car_profile_changed = any(cfg.get(k) != v for k, v in _cp_vals.items())
-    if _car_profile_changed:
-        cfg.update(_cp_vals)
-        save_config(cfg)
-
-# weight_input still needed elsewhere (RWHP display, AI payload)
 weight_input = int(cfg.get("car_weight_lbs", 2500))
 
 # ── Run selector ───────────────────────────────────────────────────────────────
@@ -1533,6 +1404,12 @@ if st.session_state.get("current_page") == "run_manager":
 # ── Instructions page ────────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "instructions":
     show_instructions(logo_src=_LOGO_SRC)
+    st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
+    st.stop()
+
+# ── Car Profile page ──────────────────────────────────────────────────────────
+if st.session_state.get("current_page") == "car_profile":
+    show_car_profile(current_user=_current_user, logo_src=_LOGO_SRC)
     st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 

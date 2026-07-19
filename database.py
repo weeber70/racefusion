@@ -323,6 +323,40 @@ def create_car(username: str, car_name: str, default_car_number: str = "") -> st
         return None
 
 
+def load_car_build_sheet(car_id: str) -> dict:
+    """Return the build_sheet JSONB dict for a car, or {} if not set."""
+    if not _sb or not car_id:
+        return {}
+    try:
+        rows = _sb.table("cars").select("build_sheet").eq("car_id", car_id).execute().data
+        if rows and rows[0].get("build_sheet"):
+            return rows[0]["build_sheet"]
+        return {}
+    except Exception:
+        return {}
+
+
+def save_car_build_sheet(car_id: str, build_sheet: dict) -> bool:
+    """Update build_sheet JSONB for a car. Returns True on success."""
+    if not _sb or not car_id:
+        return False
+    try:
+        resp = (
+            _sb.table("cars")
+            .update({"build_sheet": build_sheet})
+            .eq("car_id", car_id)
+            .execute()
+        )
+        # resp.data is a list of updated rows; empty means no row matched
+        if not resp.data:
+            st.warning("Car profile not saved — car ID not found.")
+            return False
+        return True
+    except Exception as _e:
+        st.warning(f"Could not save car profile: {_e}")
+        return False
+
+
 def save_run(csv_name: str, record: dict, car_id: str | None = None):
     if not _sb: return
     username = st.session_state.get("rf_user", "")
