@@ -891,6 +891,73 @@ def show_run_analysis(
                     save_config(cfg)
                 available_channels = [ch for ch in available_channels if ch not in hidden_channels]
 
+                # 8. Custom Channel Scales
+                st.markdown("**Custom Channel Scales**")
+
+                # Classify channels: Known (predefined/inferred) vs Unknown
+                _unknown_chs: list[str] = []
+                if _all_channels_full:
+                    for _ch0 in _all_channels_full:
+                        if (
+                            not CHANNEL_RANGES.get(_ch0)
+                            and not _infer_channel_range(_ch0)
+                            and _ch0 not in custom_ranges
+                        ):
+                            _unknown_chs.append(_ch0)
+
+                # Alert: unknown channels that haven't been given a custom scale
+                if _unknown_chs:
+                    _unk_lines = "\n".join(f"- {c}" for c in _unknown_chs[:7])
+                    _unk_more  = f"\n- … and {len(_unknown_chs) - 7} more" if len(_unknown_chs) > 7 else ""
+                    st.warning(
+                        "**No known scale for these channels — using data range:**\n\n"
+                        + _unk_lines + _unk_more
+                        + "\n\n*Set scales for them below ↓*"
+                    )
+
+                # List existing custom scales
+                if custom_ranges:
+                    for _rch, _rrng in list(custom_ranges.items()):
+                        _sl1, _sl2 = st.columns([3, 1])
+                        _sl1.caption(f"**{_rch}**: {_rrng[0]:g} – {_rrng[1]:g}")
+                        if _sl2.button("🗑️", key=f"del_range_{_rch}"):
+                            _cr = dict(cfg.get("channel_ranges", {}))
+                            _cr.pop(_rch, None)
+                            cfg["channel_ranges"] = _cr
+                            save_config(cfg)
+                            custom_ranges = {k: v for k, v in custom_ranges.items() if k != _rch}
+                            st.rerun()
+                else:
+                    st.caption("No custom scales set yet.")
+
+                # Add / Edit Scale — auto-opens when unknown channels exist
+                with st.expander("Add / Edit Scale", expanded=bool(_unknown_chs)):
+                    _default_scale_idx = 0
+                    if _unknown_chs:
+                        try:
+                            _default_scale_idx = _all_channels_full.index(_unknown_chs[0])
+                        except ValueError:
+                            _default_scale_idx = 0
+                    _scale_ch = st.selectbox(
+                        "Channel", _all_channels_full,
+                        index=_default_scale_idx,
+                        key="scale_ch_select",
+                    )
+                    _sc1, _sc2 = st.columns(2)
+                    _scale_min = _sc1.number_input("Min", value=0.0, step=1.0, key="scale_min_val")
+                    _scale_max = _sc2.number_input("Max", value=100.0, step=1.0, key="scale_max_val")
+                    if st.button("💾 Save Scale", key="save_scale_btn"):
+                        _scale_ch_clean = (_scale_ch or "").strip()
+                        if not _scale_ch_clean:
+                            st.warning("Enter a channel name.")
+                        elif _scale_max == _scale_min:
+                            st.warning("Min and Max must be different.")
+                        else:
+                            save_channel_range(current_user, _scale_ch_clean, _scale_min, _scale_max)
+                            cfg.setdefault("channel_ranges", {})[_scale_ch_clean] = [_scale_min, _scale_max]
+                            save_config(cfg)
+                            st.rerun()
+
         else:
             df_view = None
             selected_groups = []
@@ -954,82 +1021,6 @@ def show_run_analysis(
                         st.rerun()
             else:
                 st.caption("No rules set yet.")
-
-            st.divider()
-            st.markdown("**Custom Channel Scales**")
-
-            # ── Classify channels: Known (predefined/inferred) vs Unknown ────────
-            # Unknown channels fall back to data min/max — unreliable for comparison.
-            _unknown_chs: list[str] = []
-            if _all_channels_full:
-                for _ch0 in _all_channels_full:
-                    if (
-                        not CHANNEL_RANGES.get(_ch0)
-                        and not _infer_channel_range(_ch0)
-                        and _ch0 not in custom_ranges
-                    ):
-                        _unknown_chs.append(_ch0)
-
-            # Alert: unknown channels that haven't been given a custom scale
-            if _unknown_chs:
-                _unk_lines = "\n".join(f"- {c}" for c in _unknown_chs[:7])
-                _unk_more  = f"\n- … and {len(_unknown_chs) - 7} more" if len(_unknown_chs) > 7 else ""
-                st.warning(
-                    "**No known scale for these channels — using data range:**\n\n"
-                    + _unk_lines + _unk_more
-                    + "\n\n*Set scales for them below ↓*"
-                )
-
-            # ── List existing custom scales ───────────────────────────────────────
-            if custom_ranges:
-                for _rch, _rrng in list(custom_ranges.items()):
-                    _sl1, _sl2 = st.columns([3, 1])
-                    _sl1.caption(f"**{_rch}**: {_rrng[0]:g} – {_rrng[1]:g}")
-                    if _sl2.button("🗑️", key=f"del_range_{_rch}"):
-                        _cr = dict(cfg.get("channel_ranges", {}))
-                        _cr.pop(_rch, None)
-                        cfg["channel_ranges"] = _cr
-                        save_config(cfg)
-                        custom_ranges = {k: v for k, v in custom_ranges.items() if k != _rch}
-                        st.rerun()
-            else:
-                st.caption("No custom scales set yet.")
-
-            # ── Add / Edit Scale form — auto-opens when unknown channels exist ───
-            with st.expander("Add / Edit Scale", expanded=bool(_unknown_chs)):
-                if _all_channels_full:
-                    # Selectbox from actual CSV channels; pre-select first unknown
-                    _default_scale_idx = 0
-                    if _unknown_chs:
-                        try:
-                            _default_scale_idx = _all_channels_full.index(_unknown_chs[0])
-                        except ValueError:
-                            _default_scale_idx = 0
-                    _scale_ch = st.selectbox(
-                        "Channel", _all_channels_full,
-                        index=_default_scale_idx,
-                        key="scale_ch_select",
-                    )
-                else:
-                    # No CSV open — fall back to free-text entry
-                    _scale_ch = st.text_input(
-                        "Channel name", key="scale_ch_name",
-                        placeholder="e.g. Boost Press",
-                    )
-                _sc1, _sc2 = st.columns(2)
-                _scale_min = _sc1.number_input("Min", value=0.0, step=1.0, key="scale_min_val")
-                _scale_max = _sc2.number_input("Max", value=100.0, step=1.0, key="scale_max_val")
-                if st.button("💾 Save Scale", key="save_scale_btn"):
-                    _scale_ch_clean = (_scale_ch or "").strip()
-                    if not _scale_ch_clean:
-                        st.warning("Enter a channel name.")
-                    elif _scale_max == _scale_min:
-                        st.warning("Min and Max must be different.")
-                    else:
-                        save_channel_range(current_user, _scale_ch_clean, _scale_min, _scale_max)
-                        cfg.setdefault("channel_ranges", {})[_scale_ch_clean] = [_scale_min, _scale_max]
-                        save_config(cfg)
-                        st.rerun()
 
         st.markdown("---")
 
