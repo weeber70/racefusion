@@ -39,7 +39,7 @@ from charts import (
     make_overlay_chart, TRACE_COLORS, RPM_CHANNEL_NAMES,
     CHANNEL_COLORS, CHANNEL_UNITS, CHANNEL_RANGES, _infer_channel_range,
 )
-from timeslip import correct_image_orientation, scan_timeslip, _normalize_slip_result
+from timeslip import correct_image_orientation, scan_timeslip, _normalize_slip_result, _validate_timeslip
 
 
 # ── Module-level helpers (moved from app.py) ────────────────────────────────
@@ -229,6 +229,297 @@ def show_run_analysis(
     weight_input = int(cfg.get("car_weight_lbs", 2500))
 
     # ── Main area ─────────────────────────────────────────────────────────────────
+
+    # ── Timeslip validation screen ────────────────────────────────────────────────
+    # Intercepts between scan_timeslip() and the final save so the user can review
+    # and correct all scanned values before they're written to the database.
+    if st.session_state.get("pending_timeslip"):
+        _pt = st.session_state["pending_timeslip"]
+        _sr = _pt["scan_result"]
+
+        # If the car wasn't identified on the slip, explain why timing fields are blank.
+        if _sr.get("car_found") is False:
+            _scanned_with = _pt.get("form_car_number") or _sr.get("_scanned_with") or ""
+            if _scanned_with:
+                st.warning(
+                    f"⚠️ Car number **{_scanned_with}** was not found on this timeslip. "
+                    f"Enter the correct number and re-scan, or fill in timing data manually below."
+                )
+                _fix_c1, _fix_c2 = st.columns([3, 1])
+                _fix_car = _fix_c1.text_input(
+                    "Correct car number",
+                    value=_scanned_with,
+                    key="fix_car_number_input",
+                    label_visibility="collapsed",
+                    placeholder="Correct car number",
+                )
+                if _fix_c2.button("🔄 Re-scan", key="fix_rescan_btn", use_container_width=True):
+                    _fix_stripped = _fix_car.strip()
+                    if _fix_stripped and api_key:
+                        with st.spinner("Re-scanning with updated car number…"):
+                            try:
+                                _fix_result = scan_timeslip(
+                                    _pt["sl_bytes"], _pt["sl_mime"], api_key, _fix_stripped
+                                )
+                                _fix_result["_scanned_with"] = _fix_stripped
+                                _pt["scan_result"] = _fix_result
+                                _pt["form_car_number"] = _fix_stripped
+                                _pt.pop("_form_seeded", None)  # force re-seed on next render
+                                st.session_state["pending_timeslip"] = _pt
+                                st.session_state.pop("_slip_scan_skip", None)
+                                st.rerun()
+                            except Exception as _fix_err:
+                                st.error(f"Re-scan failed: {_fix_err}")
+                    elif not _fix_stripped:
+                        st.warning("Enter a car number first.")
+            else:
+                st.warning(
+                    "⚠️ No car number configured — timing fields could not be extracted. "
+                    "Enter them manually below, or set your car number in Car Profile first."
+                )
+
+        # ── Helpers for text-field numeric parsing ────────────────────────────
+        def _fn(v) -> str:
+            """Float → display string (strips trailing zeros)."""
+            return f"{float(v):g}" if v is not None else ""
+
+        def _pn(s: str):
+            """Parse text field → float or None."""
+            try:
+                return float(s.strip())
+            except (ValueError, AttributeError):
+                return None
+
+        # ── Seed form fields from OCR result ─────────────────────────────────
+        # Streamlit ignores `value=` on any widget whose key already exists in
+        # session_state (set by a prior form render — often with all-blank values
+        # from a car_not_found scan).  Pre-populate every vld_* key here so the
+        # widgets always reflect the current scan result.  The `_form_seeded` flag
+        # ensures we only overwrite the keys when the scan result is new; once the
+        # user starts editing, their changes are preserved across reruns.
+        if not _pt.get("_form_seeded"):
+            _lane_seed = str(_sr.get("lane") or "").capitalize()
+            _res_seed  = _normalize_slip_result(_sr.get("result"))
+            st.session_state.update({
+                "vld_track":   _sr.get("track_name") or "",
+                "vld_loc":     _sr.get("track_location") or "",
+                "vld_date":    _sr.get("date") or "",
+                "vld_time":    _sr.get("time") or "",
+                "vld_round":   _sr.get("round_number") or "",
+                "vld_car_num": str(_sr.get("car_number") or ""),
+                "vld_lane":    _lane_seed if _lane_seed in ("", "Left", "Right") else "",
+                "vld_result":  _res_seed  if _res_seed  in ("", "Win", "Loss", "Bye") else "",
+                "vld_dial":    _fn(_sr.get("dial_in")),
+                "vld_rt":      _fn(_sr.get("reaction_time")),
+                "vld_ft60":    _fn(_sr.get("ft_60")),
+                "vld_ft330":   _fn(_sr.get("ft_330")),
+                "vld_ft660":   _fn(_sr.get("ft_660")),
+                "vld_mph660":  _fn(_sr.get("mph_660")),
+                "vld_ft1000":  _fn(_sr.get("ft_1000")),
+                "vld_et":      _fn(_sr.get("ft_1320")),
+                "vld_mph":     _fn(_sr.get("mph_1320")),
+            })
+            _pt["_form_seeded"] = True
+
+        st.markdown("### 🎫 Review Timeslip Scan")
+        st.caption("Check and correct the values Claude read from your timeslip, then confirm to save.")
+
+        _v_left, _v_right = st.columns(2)
+
+        with _v_left:
+            st.markdown("**Track / Event**")
+            _v_track   = st.text_input("Track name",         value=_sr.get("track_name") or "",      key="vld_track")
+            _v_loc     = st.text_input("Track location",     value=_sr.get("track_location") or "",   key="vld_loc")
+            _v_date    = st.text_input("Date (YYYY-MM-DD)",  value=_sr.get("date") or "",             key="vld_date")
+            _v_time_s  = st.text_input("Time (HH:MM)",       value=_sr.get("time") or "",             key="vld_time")
+            _v_round   = st.text_input("Round",              value=_sr.get("round_number") or "",     key="vld_round")
+            st.markdown("**Car**")
+            _v_car_num = st.text_input("Car number",         value=str(_sr.get("car_number") or ""),  key="vld_car_num")
+            _lane_opts = ["", "Left", "Right"]
+            _raw_lane  = str(_sr.get("lane") or "").capitalize()
+            _lane_idx  = _lane_opts.index(_raw_lane) if _raw_lane in _lane_opts else 0
+            _v_lane    = st.selectbox("Lane", _lane_opts, index=_lane_idx, key="vld_lane")
+            _res_opts  = ["", "Win", "Loss", "Bye"]
+            _res_val   = _normalize_slip_result(_sr.get("result"))
+            _res_idx   = _res_opts.index(_res_val) if _res_val in _res_opts else 0
+            _v_result  = st.selectbox("Result", _res_opts, index=_res_idx, key="vld_result")
+            _v_dial_s  = st.text_input("Dial-in (s)",        value=_fn(_sr.get("dial_in")),           key="vld_dial")
+
+        with _v_right:
+            st.markdown("**Timing (seconds)**")
+            _v_rt_s    = st.text_input("Reaction time",      value=_fn(_sr.get("reaction_time")),     key="vld_rt")
+            _v_ft60_s  = st.text_input("60ft",               value=_fn(_sr.get("ft_60")),             key="vld_ft60")
+            _v_ft330_s = st.text_input("330ft",              value=_fn(_sr.get("ft_330")),            key="vld_ft330")
+            _v_ft660_s = st.text_input("660ft",              value=_fn(_sr.get("ft_660")),            key="vld_ft660")
+            _v_mph660_s= st.text_input("660 MPH",            value=_fn(_sr.get("mph_660")),           key="vld_mph660")
+            _v_ft1000_s= st.text_input("1000ft",             value=_fn(_sr.get("ft_1000")),           key="vld_ft1000")
+            _v_et_s    = st.text_input("1/4 ET (s)",         value=_fn(_sr.get("ft_1320")),           key="vld_et")
+            _v_mph_s   = st.text_input("Trap MPH",           value=_fn(_sr.get("mph_1320")),          key="vld_mph")
+
+        # Parse all numeric text fields
+        _v_dial   = _pn(_v_dial_s)
+        _v_rt     = _pn(_v_rt_s)
+        _v_ft60   = _pn(_v_ft60_s)
+        _v_ft330  = _pn(_v_ft330_s)
+        _v_ft660  = _pn(_v_ft660_s)
+        _v_mph660 = _pn(_v_mph660_s)
+        _v_ft1000 = _pn(_v_ft1000_s)
+        _v_et     = _pn(_v_et_s)
+        _v_mph    = _pn(_v_mph_s)
+
+        # Sanity checks
+        _v_vals = {
+            "ft_1320":       _v_et,
+            "mph_1320":      _v_mph,
+            "ft_60":         _v_ft60,
+            "ft_330":        _v_ft330,
+            "ft_660":        _v_ft660,
+            "ft_1000":       _v_ft1000,
+            "mph_660":       _v_mph660,
+            "reaction_time": _v_rt,
+        }
+        _vld_issues = _validate_timeslip(_v_vals)
+        if _vld_issues:
+            _nerr  = sum(1 for _w in _vld_issues if _w["level"] == "error")
+            _nwarn = sum(1 for _w in _vld_issues if _w["level"] == "warning")
+            _vld_parts = []
+            if _nerr:  _vld_parts.append(f"{_nerr} error{'s' if _nerr > 1 else ''}")
+            if _nwarn: _vld_parts.append(f"{_nwarn} warning{'s' if _nwarn > 1 else ''}")
+            st.markdown(f"**Validation: {', '.join(_vld_parts)}**")
+            for _w in _vld_issues:
+                if _w["level"] == "error":
+                    st.error(_w["message"])
+                else:
+                    st.warning(_w["message"])
+
+        _vb1, _vb2 = st.columns(2)
+        _vld_confirm = _vb1.button("✅ Confirm & Save", type="primary", key="vld_confirm")
+        _vld_cancel  = _vb2.button("🗑️ Cancel & Discard Timeslip",       key="vld_cancel")
+
+        if _vld_confirm:
+            # Build corrected scan result from edited fields
+            _confirmed = dict(_sr)
+            _confirmed.update({
+                "track_name":     _v_track    or None,
+                "track_location": _v_loc      or None,
+                "date":           _v_date     or None,
+                "time":           _v_time_s   or None,
+                "round_number":   _v_round    or None,
+                "car_number":     _v_car_num  or None,
+                "lane":           _v_lane     or None,
+                "result":         _v_result   or None,
+                "dial_in":        _v_dial,
+                "reaction_time":  _v_rt,
+                "ft_60":          _v_ft60,
+                "ft_330":         _v_ft330,
+                "ft_660":         _v_ft660,
+                "mph_660":        _v_mph660,
+                "ft_1000":        _v_ft1000,
+                "ft_1320":        _v_et,
+                "mph_1320":       _v_mph,
+            })
+            _pt_run_rec = dict(_pt["run_rec"])
+            _pt_run_rec["timeslip"] = _confirmed
+
+            # Auto-populate result from confirmed value
+            _conf_result = _normalize_slip_result(_confirmed.get("result"))
+            if _conf_result:
+                _rd_c = _pt_run_rec.get("run_details") or {}
+                if not _rd_c.get("result"):
+                    _rd_c["result"] = _conf_result
+                    _pt_run_rec["run_details"] = _rd_c
+
+            # Fetch weather using confirmed date / location
+            _conf_date = _confirmed.get("date")
+            if _conf_date:
+                _conf_hour = 12
+                if _confirmed.get("time"):
+                    try:
+                        _conf_hour = int(str(_confirmed["time"]).split(":")[0])
+                    except Exception:
+                        _conf_hour = 12
+                _wx_lat2, _wx_lon2, _wx_label2 = None, None, ""
+                _tname2 = _confirmed.get("track_name", "")
+                _tloc2  = _confirmed.get("track_location", "")
+                if _tname2 or _tloc2:
+                    _tk2 = lookup_track(_tname2, _tloc2)
+                    if _tk2:
+                        _wx_lat2, _wx_lon2, _wx_label2 = _tk2["lat"], _tk2["lon"], _tk2["display_name"]
+                        cfg["location_name"]  = _tname2 or _tloc2
+                        cfg["location_label"] = _tk2["display_name"]
+                        cfg["lat"]    = _tk2["lat"]
+                        cfg["lon"]    = _tk2["lon"]
+                        cfg["elev_ft"] = _tk2.get("elev_ft")
+                        save_config(cfg)
+                if _wx_lat2 is None and cfg.get("lat"):
+                    _wx_lat2   = cfg["lat"]
+                    _wx_lon2   = cfg["lon"]
+                    _wx_label2 = cfg.get("location_label", "")
+                if _wx_lat2 is not None:
+                    try:
+                        _wx2 = fetch_weather(_wx_lat2, _wx_lon2, _conf_date, _conf_hour)
+                        _da2 = calc_density_altitude(_wx2.get("temperature_f"), _wx2.get("pressure_hpa"))
+                        if _da2 is not None:
+                            _wx2["density_alt_ft"] = round(_da2)
+                        _pt_run_rec["weather"]          = _wx2
+                        _pt_run_rec["weather_date"]     = _conf_date
+                        _pt_run_rec["weather_location"] = _wx_label2
+                    except Exception:
+                        pass
+
+            _pt_run_id = _pt["run_id"]
+            save_run(_pt_run_id, _pt_run_rec)
+            for _vi2, _fv2 in enumerate(_pt.get("form_videos", [])):
+                if extract_youtube_id(_fv2.get("url", "")):
+                    add_run_video(_pt_run_id, current_user, _fv2["url"], _fv2.get("label", ""),
+                                  display_order=_vi2 + 1)
+            if _pt.get("csv_hsave"):
+                save_file_hash(_pt_run_id, "csv_file_hash", _pt["csv_hsave"])
+            if _pt.get("slp_hsave"):
+                save_file_hash(_pt_run_id, "slip_file_hash", _pt["slp_hsave"])
+            st.session_state["_newly_created_run"] = {
+                "id":      _pt_run_id,
+                "label":   _run_label(_pt_run_id, _pt_run_rec),
+                "record":  _pt_run_rec,
+                "has_csv": "timeslip_storage_key" in _pt_run_rec or bool(st.session_state.get("active_run_id")),
+            }
+            st.session_state.pop("pending_timeslip", None)
+            st.rerun()
+
+        elif _vld_cancel:
+            if _pt.get("existing_run"):
+                if _pt.get("storage_freshly_uploaded"):
+                    # A new timeslip was just uploaded for this run. Delete it from
+                    # storage and strip the storage key from the saved run record so
+                    # the run is returned to its pre-upload state.
+                    _cancel_s_key = _pt["run_rec"].get("timeslip_storage_key")
+                    if _cancel_s_key:
+                        try:
+                            _delete_slip_from_storage(_cancel_s_key)
+                        except Exception:
+                            pass
+                    _cancel_run_rec = dict(_pt["run_rec"])
+                    _cancel_run_rec.pop("timeslip_storage_key", None)
+                    _cancel_run_rec.pop("timeslip", None)
+                    save_run(_pt["run_id"], _cancel_run_rec)
+                    # Clear the upload-guard so the file uploader accepts a new file.
+                    st.session_state.pop(f"_slip_saved_{_pt['run_id']}", None)
+                # Prevent _needs_scan from immediately re-triggering on the next render.
+                st.session_state["_slip_scan_skip"] = _pt["run_id"]
+            else:
+                # New run: timeslip was uploaded during creation — delete from storage.
+                # The run record in DB has no timeslip fields yet (timeslip_storage_key
+                # was set in the in-memory dict but save_run was called before it).
+                _cancel_s_key = _pt["run_rec"].get("timeslip_storage_key")
+                if _cancel_s_key:
+                    try:
+                        _delete_slip_from_storage(_cancel_s_key)
+                    except Exception:
+                        pass
+            st.session_state.pop("pending_timeslip", None)
+            st.rerun()
+
+        st.stop()
 
     if st.session_state.get("active_run_id") is None:
         # ── Create New Run form ───────────────────────────────────────────────────
@@ -606,75 +897,31 @@ def show_run_analysis(
                     elif api_key:
                         _create_status.write("🎫 Scanning timeslip…")
                         try:
-                            # _sl_bytes comes from _pending_slip["bytes"], stored by the
-                            # _on_slip_upload on_change callback only when the uploaded
-                            # file object is not None — so bytes are guaranteed non-empty here.
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, _form_car_number)
-                            # Track which car number was used so the run-view rescan
-                            # guard can tell whether it needs to retry or not.
                             _scan_result["_scanned_with"] = _form_car_number.strip()
-
-                            if _scan_result.get("car_found") is False:
-                                _new_run_rec["timeslip"] = _scan_result
-                                _create_status.write(
-                                    f"ℹ️ Car number **{_form_car_number.strip()}** wasn't found on "
-                                    "this timeslip — the track may have printed a different number. "
-                                    "You can re-scan from the run view after confirming your car number."
-                                )
-                            else:
-                                _new_run_rec["timeslip"] = _scan_result
-
-                                # Auto-populate result from scanned slip (only if not manually set)
-                                _scanned_result = _normalize_slip_result(_scan_result.get("result"))
-                                if _scanned_result:
-                                    _rd_auto = _new_run_rec.get("run_details") or {}
-                                    if not _rd_auto.get("result"):
-                                        _rd_auto["result"] = _scanned_result
-                                        _new_run_rec["run_details"] = _rd_auto
-
-                                # ── Fetch weather ─────────────────────────────────
-                                _slip_date = _scan_result.get("date")
-                                if _slip_date:
-                                    _slip_hour = 12
-                                    if _scan_result.get("time"):
-                                        try:
-                                            _slip_hour = int(str(_scan_result["time"]).split(":")[0])
-                                        except Exception:
-                                            _slip_hour = 12
-                                    _wx_lat, _wx_lon, _wx_label = None, None, ""
-                                    _tname = _scan_result.get("track_name", "")
-                                    _tloc  = _scan_result.get("track_location", "")
-                                    if _tname or _tloc:
-                                        _create_status.write(f"📍 Looking up {_tname or _tloc}…")
-                                        _tk = lookup_track(_tname, _tloc)
-                                        if _tk:
-                                            _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
-                                            # Auto-save track location to user config
-                                            cfg["location_name"]  = _tname or _tloc
-                                            cfg["location_label"] = _tk["display_name"]
-                                            cfg["lat"] = _tk["lat"]
-                                            cfg["lon"] = _tk["lon"]
-                                            cfg["elev_ft"] = _tk.get("elev_ft")
-                                            save_config(cfg)
-                                    if _wx_lat is None and cfg.get("lat"):
-                                        _wx_lat  = cfg["lat"]
-                                        _wx_lon  = cfg["lon"]
-                                        _wx_label = cfg.get("location_label", "")
-                                    if _wx_lat is not None:
-                                        _create_status.write("🌤️ Fetching weather…")
-                                        try:
-                                            _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
-                                            _da = calc_density_altitude(
-                                                _wx.get("temperature_f"),
-                                                _wx.get("pressure_hpa"),
-                                            )
-                                            if _da is not None:
-                                                _wx["density_alt_ft"] = round(_da)
-                                            _new_run_rec["weather"]          = _wx
-                                            _new_run_rec["weather_date"]     = _slip_date
-                                            _new_run_rec["weather_location"] = _wx_label
-                                        except Exception as _wx_e:
-                                            st.warning(f"Weather fetch failed: {_wx_e}")
+                            # Store everything needed for the validation phase in session state,
+                            # then rerun so the validation UI renders before the final save.
+                            st.session_state["pending_timeslip"] = {
+                                "scan_result":    _scan_result,
+                                "run_id":         _new_run_id,
+                                "run_rec":        dict(_new_run_rec),
+                                "sl_bytes":       _sl_bytes,
+                                "sl_mime":        _sl_mime,
+                                "form_car_number": _form_car_number,
+                                "csv_hsave":      _csv_hsave,
+                                "slp_hsave":      _slp_hsave,
+                                "form_videos":    list(_form_videos),
+                                "submit_car_id":  _submit_car_id,
+                            }
+                            # Flush stale form widget keys now (the normal cleanup
+                            # at the end of _do_create won't run because we rerun here).
+                            _old_gen_s  = st.session_state["upload_gen"]
+                            _old_inst_s = st.session_state.get("_create_run_instance_key", 0)
+                            st.session_state["upload_gen"] = _old_gen_s + 1
+                            for _sk in (f"csv_uploader_{_old_inst_s}", f"slip_uploader_{_old_inst_s}",
+                                        f"create_car_num_{_old_gen_s}", "_pending_csv", "_pending_timeslip"):
+                                st.session_state.pop(_sk, None)
+                            st.rerun()
                         except Exception as _scan_e:
                             st.warning(f"Timeslip scan failed: {_scan_e}")
 
@@ -1057,6 +1304,7 @@ def show_run_analysis(
 
     # Re-scan if: no timeslip data at all, OR previous scan returned car_not_found
     # AND the effective car number has changed since the last scan attempt.
+    # Skip when the user just cancelled out of the review screen for this run.
     _needs_scan = _slip_bytes is not None and (
         "timeslip" not in run
         or (
@@ -1064,41 +1312,32 @@ def show_run_analysis(
             and run.get("timeslip", {}).get("car_found") is False
             and _effective_car_num != _last_scan_car_num
         )
-    )
+    ) and st.session_state.get("_slip_scan_skip") != csv_name
     if _needs_scan:
         if not api_key:
             _scan_status_area.warning("⚠️ ANTHROPIC_API_KEY not set — timeslip scanning unavailable.")
-        elif not _effective_car_num:
-            pass  # message handled in dashboard area below
         else:
             with _scan_status_area.status("🎫 Scanning timeslip…", expanded=False) as _scan_status:
                 try:
                     slip_data = scan_timeslip(_slip_bytes, _slip_media, api_key, _effective_car_num)
-                    slip_data["_scanned_with"] = _effective_car_num  # guard against rescanning same number
-                    if slip_data.get("car_found") is False:
-                        # Save sentinel so we don't retry until the car number changes.
-                        run["timeslip"] = slip_data
-                        run["csv_name"] = csv_name
-                        save_run(csv_name, run)
-                        _scan_status.update(
-                            label=f"ℹ️ Car #{_effective_car_num} not found on timeslip",
-                            state="warning", expanded=False,
-                        )
-                    else:
-                        run["timeslip"] = slip_data
-                        # Auto-populate result from scanned slip (only if not manually set)
-                        _scanned_result = _normalize_slip_result(slip_data.get("result"))
-                        if _scanned_result:
-                            _rd_auto = run.get("run_details") or {}
-                            if not _rd_auto.get("result"):
-                                _rd_auto["result"] = _scanned_result
-                                run["run_details"] = _rd_auto
-                        run["csv_name"] = csv_name
-                        save_run(csv_name, run)
-                        _scan_status.update(label="✅ Timeslip scanned!", state="complete", expanded=False)
-                        st.session_state["active_run_id"] = csv_name
-                        st.query_params["run"] = csv_name
-                        st.rerun()
+                    slip_data["_scanned_with"] = _effective_car_num
+                    # Route through the review screen — don't save directly.
+                    st.session_state["pending_timeslip"] = {
+                        "scan_result":              slip_data,
+                        "run_id":                   csv_name,
+                        "run_rec":                  dict(run),
+                        "existing_run":             True,
+                        "storage_freshly_uploaded": False,
+                        "sl_bytes":                 _slip_bytes,
+                        "sl_mime":                  _slip_media,
+                        "form_car_number":          _effective_car_num,
+                        "csv_hsave":                None,
+                        "slp_hsave":                None,
+                        "form_videos":              [],
+                        "submit_car_id":            None,
+                    }
+                    _scan_status.update(label="✅ Scan complete — review results", state="complete", expanded=False)
+                    st.rerun()
                 except Exception as e:
                     _scan_status.update(label="❌ Scan failed", state="error", expanded=True)
                     st.error(f"Timeslip scan failed: {e}")
@@ -1194,6 +1433,7 @@ def show_run_analysis(
 
     _run_display_name = _run_label(csv_name, run) if csv_name.endswith(".run") else csv_name
     _slip_status_label = "· 📸 Timeslip attached" if _slip_storage_key else "· 📸 No timeslip"
+    st.markdown("# 🏎️ Run Analysis")
     st.caption(f"Run: **{_run_display_name}** {_slip_status_label}")
 
     if not _csv_available:
@@ -2371,39 +2611,45 @@ def show_run_analysis(
                         else:
                             with st.spinner("🎫 Scanning with corrected car number…"):
                                 try:
-                                    # If a new photo was supplied, replace the stored timeslip
+                                    # Upload new photo first if supplied (upsert — replaces old)
+                                    _fix_new_s_key = None
                                     if _fix_use_new and _sb:
                                         _fix_stem  = re.sub(r"[^\w\-]", "_", Path(csv_name).stem)
-                                        _fix_s_key = f"{current_user}/{_fix_stem}.{_fix_scan_ext}"
+                                        _fix_new_s_key = f"{current_user}/{_fix_stem}.{_fix_scan_ext}"
                                         try:
                                             _sb.storage.from_("timeslips").upload(
-                                                path=_fix_s_key, file=_fix_scan_bytes,
+                                                path=_fix_new_s_key, file=_fix_scan_bytes,
                                                 file_options={"upsert": "true",
                                                               "content-type": _fix_scan_media},
                                             )
-                                            run["timeslip_storage_key"] = _fix_s_key
                                         except Exception as _fix_up_err:
                                             st.warning(f"Photo upload failed: {_fix_up_err}")
+                                            _fix_new_s_key = None
                                     _fix_scan = scan_timeslip(
                                         _fix_scan_bytes, _fix_scan_media, api_key, _fix_num
                                     )
                                     _fix_scan["_scanned_with"] = _fix_num
-                                    run["timeslip"] = _fix_scan
-                                    # Update the run's car number so future rescans use
-                                    # the corrected value and the run details card shows it.
-                                    run["car_number"] = _fix_num
-                                    if _fix_scan.get("car_found") is not False:
-                                        # Auto-populate W/L result from scan if not already set
-                                        _fix_result = _normalize_slip_result(_fix_scan.get("result"))
-                                        if _fix_result:
-                                            _fix_rd = run.get("run_details") or {}
-                                            if not _fix_rd.get("result"):
-                                                _fix_rd["result"] = _fix_result
-                                                run["run_details"] = _fix_rd
-                                    run["csv_name"] = csv_name
-                                    save_run(csv_name, run)
-                                    st.session_state["active_run_id"] = csv_name
-                                    st.query_params["run"] = csv_name
+                                    # Build the run_rec with updated car number / storage key
+                                    # (no timeslip data yet — confirm handler merges it).
+                                    _fix_run_rec = dict(run)
+                                    _fix_run_rec["car_number"] = _fix_num
+                                    if _fix_new_s_key:
+                                        _fix_run_rec["timeslip_storage_key"] = _fix_new_s_key
+                                    # Route through the review screen.
+                                    st.session_state["pending_timeslip"] = {
+                                        "scan_result":              _fix_scan,
+                                        "run_id":                   csv_name,
+                                        "run_rec":                  _fix_run_rec,
+                                        "existing_run":             True,
+                                        "storage_freshly_uploaded": bool(_fix_new_s_key),
+                                        "sl_bytes":                 _fix_scan_bytes,
+                                        "sl_mime":                  _fix_scan_media,
+                                        "form_car_number":          _fix_num,
+                                        "csv_hsave":                None,
+                                        "slp_hsave":                None,
+                                        "form_videos":              [],
+                                        "submit_car_id":            None,
+                                    }
                                     st.rerun()
                                 except Exception as _fix_err:
                                     st.error(f"Scan failed: {_fix_err}")

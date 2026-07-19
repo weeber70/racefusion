@@ -5,6 +5,7 @@ Exports:
   correct_image_orientation(img_bytes) → PIL Image or raw bytes
   scan_timeslip(image_bytes, media_type, api_key, car_number) → dict
   _normalize_slip_result(raw) → str
+  _validate_timeslip(vals) → list[dict]
 """
 
 import base64
@@ -155,3 +156,73 @@ def _normalize_slip_result(raw) -> str:
     if s in ("B", "BYE", "BYE RUN"):
         return "Bye"
     return ""
+
+
+def _validate_timeslip(vals: dict) -> "list[dict]":
+    """Sanity-check scanned/edited timeslip values.
+
+    Returns a list of dicts, each with keys:
+      field   — field name (or '' for cross-field checks)
+      level   — 'error' | 'warning'
+      message — human-readable description
+    """
+    warnings: list[dict] = []
+    et      = vals.get("ft_1320")
+    mph     = vals.get("mph_1320")
+    ft_60   = vals.get("ft_60")
+    reaction = vals.get("reaction_time")
+    mph_660 = vals.get("mph_660")
+
+    # 1. ET / MPH plausibility  (rule of thumb: mph ≈ 1350 / ET)
+    if et and mph:
+        expected_mph = 1350 / et
+        if mph < expected_mph * 0.75 or mph > expected_mph * 1.25:
+            warnings.append({
+                "field": "mph_1320",
+                "level": "error",
+                "message": f"MPH {mph} seems implausible for ET {et}s (expected ~{expected_mph:.0f})",
+            })
+
+    # 2. Split times must be strictly increasing
+    splits = [
+        ("ft_60",   vals.get("ft_60")),
+        ("ft_330",  vals.get("ft_330")),
+        ("ft_660",  vals.get("ft_660")),
+        ("ft_1000", vals.get("ft_1000")),
+        ("ft_1320", vals.get("ft_1320")),
+    ]
+    prev_name, prev_val = splits[0]
+    for name, val in splits[1:]:
+        if prev_val and val and val <= prev_val:
+            warnings.append({
+                "field": name,
+                "level": "error",
+                "message": f"{name} ({val}) must be greater than {prev_name} ({prev_val})",
+            })
+        prev_name, prev_val = name, val
+
+    # 3. 60ft sanity range
+    if ft_60 and (ft_60 < 0.8 or ft_60 > 2.0):
+        warnings.append({
+            "field": "ft_60",
+            "level": "warning",
+            "message": f"60ft of {ft_60}s is outside normal range (0.8–2.0s)",
+        })
+
+    # 4. Reaction time range
+    if reaction is not None and (reaction < 0 or reaction > 1.0):
+        warnings.append({
+            "field": "reaction_time",
+            "level": "warning",
+            "message": f"Reaction time {reaction}s is unusual (expected 0.0–1.0s)",
+        })
+
+    # 5. 660ft MPH cannot exceed trap MPH
+    if mph_660 and mph and mph_660 > mph:
+        warnings.append({
+            "field": "mph_660",
+            "level": "error",
+            "message": f"660ft MPH ({mph_660}) cannot exceed trap MPH ({mph})",
+        })
+
+    return warnings

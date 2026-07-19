@@ -775,12 +775,12 @@ if _cur_page != "run_manager":
         st.query_params["p"] = "run_manager"
         st.rerun()
 if _cur_page != "dashboard":
-    if st.sidebar.button("🏁 Run Analysis", use_container_width=True, key="nav_to_dashboard"):
+    if st.sidebar.button("🏎️ Run Analysis", use_container_width=True, key="nav_to_dashboard"):
         st.session_state["current_page"] = "dashboard"
         st.query_params["p"] = "dashboard"
         st.rerun()
 if _cur_page != "predictor":
-    if st.sidebar.button("🏎️ Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
+    if st.sidebar.button("🏁 Race Day Predictor", use_container_width=True, key="nav_to_predictor"):
         st.session_state["current_page"] = "predictor"
         st.query_params["p"] = "predictor"
         st.rerun()
@@ -1102,88 +1102,61 @@ elif _active_csv_name:
                     _existing_run.pop("weather", None)
                     save_run(_active_csv_name, _existing_run)
 
-                    # 2. Scan inline — same pattern as Create New Run form
-                    if not car_number_input.strip():
-                        _add_slip_status.write(
-                            "ℹ️ Enter your car number in **Car Profile** to scan timeslips. "
-                            "RaceFusion needs your car number to identify your lane on the timeslip."
-                        )
-                    elif api_key:
+                    # 2. Scan the timeslip — always attempt when api_key is available,
+                    #    regardless of whether a car number is configured.
+                    _scan_went_to_review = False
+                    if api_key:
                         _add_slip_status.write("🎫 Scanning timeslip…")
                         try:
                             _scan_result = scan_timeslip(_sl_bytes, _sl_mime, api_key, car_number_input)
                             _scan_result["_scanned_with"] = car_number_input.strip()
-
-                            if _scan_result.get("car_found") is False:
-                                # Car not found — save sentinel (with _scanned_with) so
-                                # the run-view rescan guard won't retry with the same number.
-                                _existing_run["timeslip"] = _scan_result
+                            # Only proceed to review if the scan returned at least some readable data.
+                            _has_scan_data = any(
+                                _scan_result.get(k) is not None
+                                for k in ("ft_1320", "ft_60", "date", "track_name",
+                                          "mph_1320", "reaction_time", "ft_330",
+                                          "ft_660", "ft_1000")
+                            )
+                            if _has_scan_data:
+                                st.session_state["pending_timeslip"] = {
+                                    "scan_result":              _scan_result,
+                                    "run_id":                   _active_csv_name,
+                                    "run_rec":                  dict(_existing_run),
+                                    "existing_run":             True,
+                                    "storage_freshly_uploaded": True,
+                                    "sl_bytes":                 _sl_bytes,
+                                    "sl_mime":                  _sl_mime,
+                                    "form_car_number":          car_number_input.strip(),
+                                    "csv_hsave":                None,
+                                    "slp_hsave":                None,
+                                    "form_videos":              [],
+                                    "submit_car_id":            None,
+                                }
+                                st.session_state[_slip_saved_key] = True
                                 _add_slip_status.update(
-                                    label=f"ℹ️ Car #{car_number_input.strip()} not found on timeslip",
-                                    state="warning", expanded=False,
+                                    label="✅ Scan complete — review results",
+                                    state="complete", expanded=False,
                                 )
+                                _scan_went_to_review = True
                             else:
-                                _existing_run["timeslip"] = _scan_result
-
-                                # Auto-populate result from scanned slip (only if not manually set)
-                                _scanned_result = _normalize_slip_result(_scan_result.get("result"))
-                                if _scanned_result:
-                                    _rd_auto = _existing_run.get("run_details") or {}
-                                    if not _rd_auto.get("result"):
-                                        _rd_auto["result"] = _scanned_result
-                                        _existing_run["run_details"] = _rd_auto
-
-                                # 3. Fetch weather (only when car was found)
-                                _slip_date = _scan_result.get("date")
-                                if _slip_date:
-                                    _slip_hour = 12
-                                    if _scan_result.get("time"):
-                                        try:
-                                            _slip_hour = int(str(_scan_result["time"]).split(":")[0])
-                                        except Exception:
-                                            _slip_hour = 12
-                                    _wx_lat, _wx_lon, _wx_label = None, None, ""
-                                    _tname = _scan_result.get("track_name", "")
-                                    _tloc  = _scan_result.get("track_location", "")
-                                    if _tname or _tloc:
-                                        _add_slip_status.write(f"📍 Looking up {_tname or _tloc}…")
-                                        _tk = lookup_track(_tname, _tloc)
-                                        if _tk:
-                                            _wx_lat, _wx_lon, _wx_label = _tk["lat"], _tk["lon"], _tk["display_name"]
-                                            # Auto-save track location to user config
-                                            cfg["location_name"]  = _tname or _tloc
-                                            cfg["location_label"] = _tk["display_name"]
-                                            cfg["lat"] = _tk["lat"]
-                                            cfg["lon"] = _tk["lon"]
-                                            cfg["elev_ft"] = _tk.get("elev_ft")
-                                            save_config(cfg)
-                                    if _wx_lat is None and cfg.get("lat"):
-                                        _wx_lat  = cfg["lat"]
-                                        _wx_lon  = cfg["lon"]
-                                        _wx_label = cfg.get("location_label", "")
-                                    if _wx_lat is not None:
-                                        _add_slip_status.write("🌤️ Fetching weather…")
-                                        try:
-                                            _wx = fetch_weather(_wx_lat, _wx_lon, _slip_date, _slip_hour)
-                                            _da = calc_density_altitude(
-                                                _wx.get("temperature_f"),
-                                                _wx.get("pressure_hpa"),
-                                            )
-                                            if _da is not None:
-                                                _wx["density_alt_ft"] = round(_da)
-                                            _existing_run["weather"]          = _wx
-                                            _existing_run["weather_date"]     = _slip_date
-                                            _existing_run["weather_location"] = _wx_label
-                                        except Exception as _wx_e:
-                                            _add_slip_status.write(f"⚠️ Weather unavailable: {_wx_e}")
+                                _add_slip_status.update(
+                                    label="❌ Could not read timeslip",
+                                    state="error", expanded=True,
+                                )
+                                _add_slip_status.error(
+                                    "Could not read timeslip — please try again or "
+                                    "check the image quality."
+                                )
                         except Exception as _scan_e:
-                            _add_slip_status.write(f"⚠️ Scan failed: {_scan_e}")
+                            _add_slip_status.update(label="❌ Scan failed", state="error", expanded=True)
+                            _add_slip_status.error(f"Scan failed: {_scan_e}")
 
-                    save_run(_active_csv_name, _existing_run)
-                    st.session_state["active_run_id"] = _active_csv_name
-                    st.query_params["run"] = _active_csv_name
-                    st.session_state[_slip_saved_key] = True
-                    _add_slip_status.update(label="✅ Timeslip added!", state="complete", expanded=False)
+                    if not _scan_went_to_review:
+                        st.session_state["active_run_id"] = _active_csv_name
+                        st.query_params["run"] = _active_csv_name
+                        st.session_state[_slip_saved_key] = True
+                        if not api_key:
+                            _add_slip_status.update(label="✅ Timeslip added!", state="complete", expanded=False)
 
             if _slip_upload_ok:
                 st.rerun()
@@ -1205,6 +1178,8 @@ elif _active_csv_name:
             save_run(_active_csv_name, _existing_run)
             st.session_state["active_run_id"] = _active_csv_name
             st.query_params["run"] = _active_csv_name
+            # Clear the upload-guard so the file uploader accepts a fresh file.
+            st.session_state.pop(f"_slip_saved_{_active_csv_name}", None)
             st.rerun()
         st.sidebar.caption(f"✅ Timeslip on file: {_existing_slip_key.split('/')[-1]}")
 
@@ -1314,7 +1289,7 @@ if st.session_state.get("current_page") == "upgrade":
         )
     else:
         st.markdown("## 🏁 RaceFusion")
-    st.markdown("# ⬆️ Upgrade RaceFusion")
+    st.markdown("# 💳 Upgrade RaceFusion")
 
     # ── Proactive Stripe check on every upgrade page load for trial users ─────
     # Catches missed redirects (browser closed, Streamlit restart, etc.).
