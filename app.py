@@ -878,6 +878,48 @@ else:
         st.session_state.pop("_pending_csv", None)
         st.session_state.pop("_pending_timeslip", None)
 
+# ── Persistent "Run Open" indicator ─────────────────────────────────────────
+if _active_csv_name:
+    # Look up car name (one small DB hit; user typically has 1–2 cars)
+    _open_rec     = next((r["record"] for r in _saved_runs if r["filename"] == _active_csv_name), {})
+    _open_car_id  = _open_rec.get("car_id")
+    _open_car_name = ""
+    if _open_car_id:
+        _oc_cars  = get_user_cars(_current_user)
+        _oc_match = next((c for c in _oc_cars if c["car_id"] == _open_car_id), None)
+        if _oc_match:
+            _open_car_name = _oc_match.get("car_name", "")
+
+    st.sidebar.markdown("---")
+    _ro_label = f"🟢 **Run Open:** {_open_car_name}" if _open_car_name else "🟢 **Run Open**"
+    st.sidebar.markdown(_ro_label)
+    st.sidebar.caption(_active_csv_name)
+    _ro_c1, _ro_c2 = st.sidebar.columns(2)
+    if _ro_c1.button("✅ Save & Close", use_container_width=True, key="sidebar_save_close_btn"):
+        _old_gen  = st.session_state["upload_gen"]
+        _old_inst = st.session_state.get("_create_run_instance_key", 0)
+        st.session_state["upload_gen"] = _old_gen + 1
+        for _stale_key in [
+            f"csv_uploader_{_old_inst}",
+            f"slip_uploader_{_old_inst}",
+            f"create_car_num_{_old_gen}",
+            f"create_run_type_{_old_gen}",
+            f"create_note_{_old_gen}",
+            f"create_run_btn_{_old_gen}",
+            "_last_uploaded_csv",
+        ]:
+            st.session_state.pop(_stale_key, None)
+        st.session_state["_reset_selector"] = True
+        st.rerun()
+    if _ro_c2.button("🗑 Discard", use_container_width=True, key="sidebar_discard_btn"):
+        _delete_run_files(_active_csv_name)
+        st.session_state["active_run_id"] = None
+        st.session_state["current_page"] = "run_manager"
+        st.query_params["p"] = "run_manager"
+        st.query_params.pop("run", None)
+        st.session_state["_reset_selector"] = True
+        st.rerun()
+
 st.sidebar.markdown("---")
 
 # Reserve sidebar slot here — RacePak Controls will be rendered into this

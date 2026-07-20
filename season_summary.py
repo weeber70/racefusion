@@ -297,7 +297,7 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
             f'<td style="padding:4px 6px;text-align:left;border-bottom:1px solid #111;{_row_bg}color:#aaa;white-space:nowrap;">'
             f'{_date_disp}</td>'
             f'<td style="padding:4px 6px;text-align:left;border-bottom:1px solid #111;{_row_bg}color:#ddd;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;">'
-            f'{_ssm_cell(_sl.get("track_name") or _sl.get("track_location"))}</td>'
+            f'{_ssm_cell((_sl.get("track_name") or _sl.get("track_location") or "").strip().title() or None)}</td>'
             f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_rt_color};{_rt_bold}">{_ssm_cell(_sl.get("reaction_time"), "{:.3f}")}</td>'
             f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:{_60_color};{_60_bold}">{_ssm_cell(_sl.get("ft_60"),  "{:.3f}")}</td>'
             f'<td style="padding:4px 6px;text-align:right;border-bottom:1px solid #111;{_row_bg}color:#aaa;">{_ssm_cell(_sl.get("ft_330"), "{:.3f}")}</td>'
@@ -350,7 +350,7 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     # ── Runs by Track ─────────────────────────────────────────────────────────
     _ssm_track_map: dict = {}
     for r in _ssm_runs:
-        _tk = (r["slip"].get("track_name") or r["slip"].get("track_location") or "Unknown").strip() or "Unknown"
+        _tk = (r["slip"].get("track_name") or r["slip"].get("track_location") or "Unknown").strip().title() or "Unknown"
         if _tk not in _ssm_track_map:
             _ssm_track_map[_tk] = {"runs": 0, "ets": []}
         _ssm_track_map[_tk]["runs"] += 1

@@ -361,6 +361,13 @@ def save_run(csv_name: str, record: dict, car_id: str | None = None):
     if not _sb: return
     username = st.session_state.get("rf_user", "")
     _extra = {"car_id": car_id} if car_id else {}
+    # Normalize track name to Title Case so variations like "GREAT LAKES DRAGAWAY"
+    # and "Great Lakes Dragaway" merge into the same track in Season Summary.
+    _slip = record.get("timeslip")
+    if isinstance(_slip, dict):
+        for _tk in ("track_name", "track_location"):
+            if _slip.get(_tk):
+                _slip[_tk] = _slip[_tk].strip().title()
     try:
         existing = _sb.table("runs").select("id").eq("username", username).eq("csv_filename", csv_name).execute().data
         if existing:

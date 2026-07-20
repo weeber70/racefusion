@@ -1455,41 +1455,10 @@ def show_run_analysis(
         except Exception:
             pass
 
-    # ── Run header: car name (left) + Save & Close (right) ──────────────────────
+    # ── Run header: car name ─────────────────────────────────────────────────────
     st.markdown("<div style='margin-top:24px'></div>", unsafe_allow_html=True)
-    _hdr_col1, _hdr_col2 = st.columns([5, 2], vertical_alignment="center")
     if _run_car_name:
-        _hdr_col1.markdown(f"## **{_run_car_name}**")
-    _hdr_col2a, _hdr_col2b = _hdr_col2.columns(2)
-    if _hdr_col2a.button("✅ Save & Close Run", use_container_width=True, type="primary",
-                         key="save_close_btn",
-                         help="Saves all run data and returns to upload screen for the next run"):
-        # Just reset the UI — keep CSV, timeslip image, and JSON all intact
-        _old_gen  = st.session_state["upload_gen"]
-        _old_inst = st.session_state.get("_create_run_instance_key", 0)
-        st.session_state["upload_gen"] = _old_gen + 1
-        for _stale_key in [
-            f"csv_uploader_{_old_inst}",
-            f"slip_uploader_{_old_inst}",
-            f"create_car_num_{_old_gen}",
-            f"create_run_type_{_old_gen}",
-            f"create_note_{_old_gen}",
-            f"create_run_btn_{_old_gen}",
-            "_last_uploaded_csv",
-        ]:
-            st.session_state.pop(_stale_key, None)
-        st.session_state["_reset_selector"] = True
-        st.rerun()
-    if _hdr_col2b.button("🗑 Discard Run", use_container_width=True, type="secondary",
-                         key="discard_close_btn",
-                         help="Permanently delete this run and return to Run Manager"):
-        _delete_run_files(csv_name)
-        st.session_state["active_run_id"] = None
-        st.session_state["current_page"] = "run_manager"
-        st.query_params["p"] = "run_manager"
-        st.query_params.pop("run", None)
-        st.session_state["_reset_selector"] = True
-        st.rerun()
+        st.markdown(f"## **{_run_car_name}**")
 
     # ── Summary row ───────────────────────────────────────────────────────────────
     # Pull timeslip values for ET / MPH / RWHP when available; fall back to CSV
@@ -2006,9 +1975,9 @@ def show_run_analysis(
             "transmission":    _ms(car_cfg.get("transmission",""), "transmission type"),
             "num_gears":       _num_g,
             "gear_ratios":     _gear_ratio_list,
-            "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — needed to validate DS RPM vs engine RPM"),
+            "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — used for MPH sanity check: DS_RPM × rear_ratio × rollout / 12 / 5280 × 60 ≈ MPH"),
             "suspension_type": _ms(car_cfg.get("suspension_type",""), "suspension type (hardtail/shocks) — affects 60ft interpretation"),
-            "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size — needed to calculate tire RPM and slip"),
+            "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size"),
             "weight_lbs":      car_cfg.get("car_weight_lbs","") or "NOT SET — needed for G-force and RWHP cross-check",
             "notes":           car_cfg.get("car_notes",""),
         }
@@ -2075,8 +2044,12 @@ def show_run_analysis(
     An ET gain without a corresponding MPH gain means the improvement came from the launch, not more power. \
     Cross-check the ET and MPH against car weight using the Hale formula: RWHP ≈ weight × (mph/234)³. \
     This formula produces rear-wheel horsepower (RWHP), not flywheel HP — always label this value as RWHP in your analysis, never as "flywheel HP" or "HP at the flywheel." \
-    If gear ratios and rear end ratio are provided, validate driveshaft RPM against engine RPM at each gear using: \
-      expected_DS_RPM = engine_RPM / (gear_ratio × rear_ratio). Flag if measured DS RPM diverges significantly.
+    If gear ratios are provided, validate driveshaft RPM against engine RPM at each shift point using: \
+      expected_DS_RPM = engine_RPM / gear_ratio. \
+    The DS RPM channel is measured at the transmission output shaft — it does NOT include the rear-end ratio. \
+    If G-Meter MPH is available, sanity-check DS RPM calibration with: \
+      DS_RPM × rear_ratio × tire_rollout_inches / 12 / 5280 × 60 ≈ vehicle_MPH. \
+    Flag significant divergence between expected and measured DS RPM as possible driveshaft slip or tire spin — not a calibration error.
 
     ## Cross-Run Comparison
     Compare this run against every previous run using raw ET, 60ft, and MPH — do not compute or reference corrected ET. \
@@ -2095,7 +2068,13 @@ def show_run_analysis(
     - **EGTs**: Compute average EGT across all cylinders. Flag any cylinder more than ~75°F above average (lean) or below average (rich/misfire).
     - **Boost**: Peak value, time to peak, any top-end falloff. For a roots blower, boost should rise and hold — late falloff can indicate belt slip or insufficient carb capacity. For a screw, expect a sharper initial spike.
     - **Fuel pressure**: Stable through the run? Any drop at high RPM signals a supply problem.
-    - **Driveshaft RPM vs Engine RPM**: Use gear ratios from the car profile to calculate expected DS RPM at each shift point. Flag significant divergence as driveshaft slip or tire spin.
+    - **Driveshaft RPM vs Engine RPM**: DS RPM is measured at the transmission output shaft (after the gearbox, before the rear end). \
+      Expected DS RPM at any shift point = engine_RPM / gear_ratio. Do NOT divide by rear ratio — that would give wheel RPM, which is not what this channel measures. \
+      Flag significant divergence between expected and measured DS RPM as driveshaft slip or tire spin.
+    - **Conv % Slip interpretation**: The raw Conv % Slip channel = (Engine_RPM − DS_RPM) / Engine_RPM × 100. \
+      This is NOT pure converter slip in gears other than 1:1 — the gear ratio creates an apparent offset. \
+      True converter slip = 1 − (DS_RPM × gear_ratio / Engine_RPM). In high gear (1:1), the raw value equals true converter slip directly. \
+      Do not flag the DS RPM channel as miscalibrated or incorrectly scaled — the channel and its calibration are correct.
     - **G-force (Accel G)**: Peak G, when it occurs, how it trails off. Cross-check 60ft G against what is physically expected for the car weight — a 2,800 lb car can't sustain 2.0 G for 60ft.
     - **Oil pressure**: Any dip at the top end signals oil starvation concern. Note peak RPM vs oil pressure minimum.
     - Any other channel with a spike, dropout, or unexpected trend.
