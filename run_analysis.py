@@ -2762,15 +2762,6 @@ def show_run_analysis(
         st.info("📎 Upload a timeslip photo in the sidebar to add run data and auto-fetch weather.", icon="🎫")
         st.markdown("---")
 
-    # Always show the raw timeslip photo when the image is in storage,
-    # regardless of whether OCR scan data is available.
-    if _slip_bytes is not None:
-        # Expand by default when there's no scan data to show (helps the user
-        # see what was uploaded and decide whether to re-scan).
-        _photo_expanded = not bool(slip)
-        with st.expander("📷 Timeslip photo", expanded=_photo_expanded):
-            st.image(correct_image_orientation(_slip_bytes), use_container_width=True)
-
     # ── Channel charts (one chart per group, all channels overlaid) ───────────────
     if not _csv_available:
         st.markdown(
@@ -2835,35 +2826,43 @@ def show_run_analysis(
 
         st.markdown(f"### {grp}")
 
-        # Y-axis primary channel selector — persists per group across reruns
+        # Y-axis primary channel — read from session_state so the chart renders
+        # with the current selection before the selector widget appears below it.
         _grp_default = _GROUP_PRIMARY_DEFAULTS.get(grp, grp_channels[0])
         if _grp_default not in grp_channels:
             _grp_default = grp_channels[0]
-        _primary_ch = st.selectbox(
-            "Y-axis channel", grp_channels,
-            index=grp_channels.index(_grp_default),
-            key=f"primary_ch_{grp}",
-        )
+        _primary_ch = st.session_state.get(f"primary_ch_{grp}", _grp_default)
+        if _primary_ch not in grp_channels:
+            _primary_ch = _grp_default
 
         fig = make_overlay_chart(grp_channels, _primary_ch, grp, time_col, df_view, t_range, mode, chart_height,
                                  dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
+
+        st.selectbox(
+            "Change Y-axis:", grp_channels,
+            index=grp_channels.index(_primary_ch),
+            key=f"primary_ch_{grp}",
+        )
         st.markdown("---")
 
     # ── Custom Overlay chart ──────────────────────────────────────────────────────
     if custom_channels:
         st.markdown("### 🔀 Custom Overlay")
-        _custom_primary = st.selectbox(
-            "Y-axis channel", custom_channels,
-            index=0,
-            key="primary_ch_custom_overlay",
-        )
+        _custom_primary = st.session_state.get("primary_ch_custom_overlay", custom_channels[0])
+        if _custom_primary not in custom_channels:
+            _custom_primary = custom_channels[0]
         fig = make_overlay_chart(custom_channels, _custom_primary, "Custom Overlay",
                                  time_col, df_view, t_range, mode, chart_height,
                                  dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
+        st.selectbox(
+            "Change Y-axis:", custom_channels,
+            index=custom_channels.index(_custom_primary),
+            key="primary_ch_custom_overlay",
+        )
         st.markdown("---")
 
     # ── EGT Full Panel ────────────────────────────────────────────────────────────
@@ -3013,11 +3012,9 @@ def show_run_analysis(
         _egt_ts_default = next(
             (ch for ch in _ts_channels if re.match(r"Cyl #\d", ch)), _ts_channels[0]
         )
-        _egt_ts_primary = st.selectbox(
-            "Y-axis channel", _ts_channels,
-            index=_ts_channels.index(_egt_ts_default),
-            key="primary_ch_egt_ts",
-        )
+        _egt_ts_primary = st.session_state.get("primary_ch_egt_ts", _egt_ts_default)
+        if _egt_ts_primary not in _ts_channels:
+            _egt_ts_primary = _egt_ts_default
         _ts_fig = make_overlay_chart(_ts_channels, _egt_ts_primary, "EGT",
                                      time_col, df_view, t_range, mode, 320,
                                      dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
@@ -3037,6 +3034,12 @@ def show_run_analysis(
                     trace.line.dash = "dash"
             st.plotly_chart(_ts_fig, use_container_width=True)
 
+        st.selectbox(
+            "Change Y-axis:", _ts_channels,
+            index=_ts_channels.index(_egt_ts_primary),
+            key="primary_ch_egt_ts",
+        )
+
         _spread_note = (
             f"Engine diagram: 🔵 Cold (>{EGT_SPREAD_LIMIT}° below avg)  &nbsp;·&nbsp; "
             f"🔷 Cool (>{EGT_SPREAD_LIMIT//2}° below)  &nbsp;·&nbsp; "
@@ -3053,181 +3056,6 @@ def show_run_analysis(
                        f"Set a max rule for any Cyl channel in Channel Rules to enable absolute threshold coloring")
 
         st.markdown("---")
-
-    # ── Run Summary ──────────────────────────────────────────────────────────────
-    st.markdown("## 📊 Run Summary")
-
-    def _fmt(val, fmt="{}", fallback="—"):
-        """Format a value, returning fallback if None/empty/zero."""
-        try:
-            if val is None or val == "" or val == 0 or val == 0.0:
-                return fallback
-            return fmt.format(val)
-        except Exception:
-            return str(val) if val else fallback
-
-    _sum_slip = run.get("timeslip", {})
-    _sum_wx   = run.get("weather", {})
-    _sum_rd   = run.get("run_details", {})
-
-    # ── GENERAL + WEATHER ─────────────────────────────────────────────────────────
-    _sc1, _sc2 = st.columns(2)
-
-    with _sc1:
-        st.markdown("##### 📍 General")
-        _g_rows = [
-            ("Track",  _sum_slip.get("track_name") or _sum_slip.get("track_location") or "—"),
-            ("Date",   _sum_slip.get("date", "—")),
-            ("Time",   _sum_slip.get("time", "—")),
-            ("Lane",   _sum_slip.get("lane", "—")),
-        ]
-        for _lbl, _val in _g_rows:
-            _gc1, _gc2 = st.columns([2, 3])
-            _gc1.caption(_lbl)
-            _gc2.markdown(f"**{_val}**")
-
-    with _sc2:
-        st.markdown("##### 🌤️ Weather")
-        # Prefer timeslip-extracted values (printed on the slip); fall back to weather API
-        _w_temp    = _sum_slip.get("temp_f")       or _sum_wx.get("temperature_f")
-        _w_humid   = _sum_slip.get("humidity_pct") or _sum_wx.get("humidity_pct")
-        # Baro: timeslip gives inHg directly; API gives hPa → convert
-        _w_baro_hpa = _sum_wx.get("pressure_hpa")
-        _w_baro    = _sum_slip.get("baro_inhg") or (_w_baro_hpa * 0.02953 if _w_baro_hpa else None)
-        # Wind: timeslip gives "14.25 SE" string; API gives speed + direction degrees
-        _w_wind_spd = _sum_wx.get("windspeed_mph")
-        _w_wind_dir = wind_dir_label(_sum_wx.get("wind_dir_deg"))
-        _w_wind    = _sum_slip.get("wind") or (f"{_w_wind_spd:.1f} {_w_wind_dir}" if _w_wind_spd else None)
-        # Density alt: timeslip if present, otherwise compute from API values
-        _w_da      = _sum_slip.get("density_alt_ft") or calc_density_altitude(_w_temp, _w_baro_hpa)
-        _w_rows = [
-            ("Temp",         _fmt(_w_temp,  "{:.1f} °F")),
-            ("Baro. Press.", _fmt(_w_baro,  "{:.2f} in")),
-            ("Humidity",     _fmt(_w_humid, "{:.0f} %")),
-            ("Wind",         str(_w_wind) if _w_wind else "—"),
-            ("Density Alt.", _fmt(_w_da,    "{:,.0f} ft")),
-        ]
-        for _lbl, _val in _w_rows:
-            _wc1, _wc2 = st.columns([2, 3])
-            _wc1.caption(_lbl)
-            _wc2.markdown(f"**{_val}**")
-
-    st.markdown("---")
-
-    # ── RUN RESULTS ───────────────────────────────────────────────────────────────
-    st.markdown("##### 🏁 Run Results")
-    _rr_cols = st.columns(9)
-    _rr_headers = ["R/T", "60'", "330'", "1/8 Mile", "1/8 MPH", "1000'", "1/4 Mile", "1/4 MPH", "Issues"]
-    _rr_vals = [
-        _fmt(_sum_slip.get("reaction_time") or _sum_slip.get("rt"), "{:.3f}"),
-        _fmt(_sum_slip.get("ft_60")  or _sum_slip.get("et_60"),   "{:.3f}"),
-        _fmt(_sum_slip.get("ft_330") or _sum_slip.get("et_330"),  "{:.3f}"),
-        _fmt(_sum_slip.get("ft_660") or _sum_slip.get("et_660") or _sum_slip.get("et_eighth"), "{:.3f}"),
-        _fmt(_sum_slip.get("mph_660") or _sum_slip.get("mph_eighth"), "{:.2f}"),
-        _fmt(_sum_slip.get("ft_1000") or _sum_slip.get("et_1000"), "{:.3f}"),
-        _fmt(_sum_slip.get("ft_1320") or _sum_slip.get("et_quarter") or _sum_slip.get("et"), "{:.3f}"),
-        _fmt(_sum_slip.get("mph_1320") or _sum_slip.get("mph_quarter") or _sum_slip.get("mph"), "{:.2f}"),
-        _sum_slip.get("issues") or "—",
-    ]
-    for _col, _hdr, _val in zip(_rr_cols, _rr_headers, _rr_vals):
-        _col.caption(_hdr)
-        _col.markdown(f"**{_val}**")
-
-    # RacePak peak row
-    st.divider()
-    st.markdown("##### 📡 Channel Peaks")
-    _rp_items = []
-    for _rp_ch, _rp_lbl in [
-        ("Engine RPM", "Peak RPM"), ("Boost Press", "Peak Boost (psi)"),
-        ("Fuel Press", "Peak Fuel PSI"), ("Fuel Flow", "Peak Fuel Flow"),
-        ("Oil Press", "Min Oil PSI"), ("Trans Temp", "Peak Trans Temp"),
-        ("Accel G", "Peak G"),
-    ]:
-        if _rp_ch in df.columns:
-            _s = df[_rp_ch].dropna()
-            if not _s.empty:
-                _rp_items.append((_rp_lbl, _s.min() if "Min" in _rp_lbl else _s.max()))
-
-    if _rp_items:
-        _rp_cols = st.columns(len(_rp_items))
-        for _col, (_lbl, _val) in zip(_rp_cols, _rp_items):
-            _col.caption(_lbl)
-            _col.markdown(f"**{_val:,.1f}**")
-
-    st.markdown("---")
-
-    # ── TUNING ────────────────────────────────────────────────────────────────────
-    st.markdown("##### 🔧 Tuning")
-
-    _t1, _t2, _t3, _t4 = st.columns(4)
-
-    with _t1:
-        st.caption("**Fuel System**")
-        _rp_fuel_psi  = df["Fuel Press"].dropna().max() if df is not None and "Fuel Press" in df.columns else None
-        _rp_fuel_flow = df["Fuel Flow"].dropna().max()  if df is not None and "Fuel Flow"  in df.columns else None
-        _tune_fuel = [
-            ("Main Jet",      _fmt(_sum_rd.get("main_jet"),  "{:.3f}")),
-            ("Max Fuel PSI",  _fmt(_rp_fuel_psi,             "{:.1f}") + " ⚡" if _rp_fuel_psi else "—"),
-            ("Max Fuel Flow", _fmt(_rp_fuel_flow,            "{:.3f}") + " ⚡" if _rp_fuel_flow else "—"),
-            ("HS Jet",        _fmt(_sum_rd.get("hs_jet"),    "{:.3f}")),
-            ("HS Open PSI",   _fmt(_sum_rd.get("hs_open_psi"), "{:.0f}")),
-        ]
-        for _lbl, _val in _tune_fuel:
-            _a, _b = st.columns([3, 2])
-            _a.caption(_lbl)
-            _b.markdown(f"**{_val}**")
-
-    with _t2:
-        st.caption("**Blower**")
-        _sum_tp = _sum_rd.get("top_pulley", 0)
-        _sum_bp = _sum_rd.get("bottom_pulley", 0)
-        _sum_od = ((_sum_bp / _sum_tp) - 1) if _sum_tp else _sum_rd.get("overdrive", 0)
-        _sum_boost = df["Boost Press"].dropna().max() if df is not None and "Boost Press" in df.columns else None
-        _tune_blow = [
-            ("Top Pulley",    _fmt(_sum_tp, "{:.0f}")),
-            ("Bottom Pulley", _fmt(_sum_bp, "{:.0f}")),
-            ("Overdrive",     f"{_sum_od * 100:.2f}%" if _sum_tp else "—"),
-            ("Peak Boost",    _fmt(_sum_boost, "{:.1f} psi") + " ⚡" if _sum_boost else "—"),
-            ("W/B – D",       _fmt(_sum_rd.get("wheelie_bar_d"), "{:.3f}\"")),
-            ("W/B – P",       _fmt(_sum_rd.get("wheelie_bar_p"), "{:.3f}\"")),
-        ]
-        for _lbl, _val in _tune_blow:
-            _a, _b = st.columns([3, 2])
-            _a.caption(_lbl)
-            _b.markdown(f"**{_val}**")
-
-    with _t3:
-        st.caption("**Tires & Track**")
-        _tune_tire = [
-            ("Front PSI",    _fmt(_sum_rd.get("tire_pressure_fl") or _sum_rd.get("tire_pressure_fr"),
-                                  "{:.1f}")),
-            ("Rear PSI",     _fmt(_sum_rd.get("tire_pressure_rl") or _sum_rd.get("tire_pressure_rr"),
-                                  "{:.1f}")),
-            ("Track Temp",   _fmt(_sum_rd.get("track_temp_f"),  "{:.0f} °F")),
-            ("Tire Temp",    _fmt(_sum_rd.get("tire_temp_f"),   "{:.0f} °F")),
-        ]
-        for _lbl, _val in _tune_tire:
-            _a, _b = st.columns([3, 2])
-            _a.caption(_lbl)
-            _b.markdown(f"**{_val}**")
-
-    with _t4:
-        st.caption("**Ignition & RPM**")
-        _tune_ign = [
-            ("Launch RPM",   _fmt(_sum_rd.get("launch_rpm"),   "{:,}")),
-            ("Shift Point",  _fmt(_sum_rd.get("shift_point"),  "{:,}")),
-            ("Spark Plug",   _sum_rd.get("spark_plug")  or "—"),
-            ("Plug Gap",     _sum_rd.get("plug_gap")    or "—"),
-            ("Valve Lash",   _sum_rd.get("valve_lash")  or "—"),
-        ]
-        for _lbl, _val in _tune_ign:
-            _a, _b = st.columns([3, 2])
-            _a.caption(_lbl)
-            _b.markdown(f"**{_val}**")
-
-    # Notes row
-    if _sum_rd.get("notes"):
-        st.caption(f"📝 Notes: {_sum_rd['notes']}")
 
     st.caption("📡 **All Channels** — Groups and visibility are editable.")
     with st.expander("📡 All Channels"):
@@ -3309,9 +3137,9 @@ def show_run_analysis(
             mime="text/csv",
         )
 
-    if current_user == "weeber70":
-        with st.expander("🗂️ Run Record (JSON)", expanded=False):
-            st.json(run)
+    if _slip_bytes is not None:
+        with st.expander("📷 Timeslip photo", expanded=False):
+            st.image(correct_image_orientation(_slip_bytes), use_container_width=True)
 
     # ── Export all runs ───────────────────────────────────────────────────────────
     st.markdown("---")
@@ -3415,12 +3243,4 @@ def show_run_analysis(
             )
         else:
             st.info("No saved runs to export.")
-    st.markdown(
-        "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
-        "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
-        "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
-        "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
-        "text-decoration:none;'>Contact Us</a></div>",
-        unsafe_allow_html=True,
-    )
 
