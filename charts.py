@@ -282,7 +282,7 @@ def make_overlay_chart(channels, primary_channel, title, time_col, df_view, t_ra
             customdata=raw,
             mode=mode, name=ch,
             legendgroup=ch, showlegend=False,
-            line=dict(width=1.5, color=_c),
+            line=dict(width=1, color=_c),
             marker=dict(size=3, color=_c),
             hovertemplate=_hover,
         ))

@@ -1063,12 +1063,8 @@ def show_run_analysis(
         st.markdown("### 📊 Run Data Controls")
         if _csv_available:
             with st.expander("Graph Controls", expanded=False):
-                # 1. Smoothing
-                st.markdown("**Smoothing**")
-                smooth_points = st.slider(
-                    "Points", min_value=1, max_value=50, value=25, step=1,
-                    key="chart_smooth_points",
-                )
+                # Smoothing is now a per-chart slider below each chart
+                # (mirrors Run Comparison layout).
 
                 # 2. RPM Range
                 st.markdown("**RPM Range**")
@@ -1099,7 +1095,7 @@ def show_run_analysis(
                 # 5. Groups to Show
                 st.markdown("**Groups to Show**")
                 selected_groups = st.multiselect(
-                    "Channel groups", options=groups_present, default=groups_present[:4],
+                    "Channel groups", options=groups_present, default=groups_present,
                     help="Each group shows all its channels overlaid on one chart",
                     key=f"sel_groups_{csv_name}",
                 )
@@ -1213,7 +1209,6 @@ def show_run_analysis(
             chart_height = 320
             mode = "lines"
             _chart_rpm_max = 10000
-            smooth_points = 1
 
         # ── Channel Rules ─────────────────────────────────────────────────────────
         _rules = cfg.get("channel_rules", {})
@@ -2814,8 +2809,11 @@ def show_run_analysis(
         if _primary_ch not in grp_channels:
             _primary_ch = _grp_default
 
+        # Per-chart smoothing — read before rendering (key-before-widget pattern)
+        _grp_smooth = st.session_state.get(f"smooth_{grp}", 1)
+
         fig = make_overlay_chart(grp_channels, _primary_ch, grp, time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
+                                 dark=True, smooth_points=_grp_smooth, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
 
@@ -2823,6 +2821,11 @@ def show_run_analysis(
             "Change Y-axis:", grp_channels,
             index=grp_channels.index(_primary_ch),
             key=f"primary_ch_{grp}",
+        )
+        st.slider(
+            "Smoothing window", min_value=1, max_value=25, value=1, step=1,
+            key=f"smooth_{grp}",
+            help="Rolling-average window in samples. 1 = no smoothing.",
         )
         st.markdown("---")
 
@@ -2832,15 +2835,21 @@ def show_run_analysis(
         _custom_primary = st.session_state.get("primary_ch_custom_overlay", custom_channels[0])
         if _custom_primary not in custom_channels:
             _custom_primary = custom_channels[0]
+        _custom_smooth = st.session_state.get("smooth_custom_overlay", 1)
         fig = make_overlay_chart(custom_channels, _custom_primary, "Custom Overlay",
                                  time_col, df_view, t_range, mode, chart_height,
-                                 dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
+                                 dark=True, smooth_points=_custom_smooth, custom_ranges=custom_ranges)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         st.selectbox(
             "Change Y-axis:", custom_channels,
             index=custom_channels.index(_custom_primary),
             key="primary_ch_custom_overlay",
+        )
+        st.slider(
+            "Smoothing window", min_value=1, max_value=25, value=1, step=1,
+            key="smooth_custom_overlay",
+            help="Rolling-average window in samples. 1 = no smoothing.",
         )
         st.markdown("---")
 
@@ -2994,9 +3003,10 @@ def show_run_analysis(
         _egt_ts_primary = st.session_state.get("primary_ch_egt_ts", _egt_ts_default)
         if _egt_ts_primary not in _ts_channels:
             _egt_ts_primary = _egt_ts_default
+        _egt_smooth = st.session_state.get("smooth_egt_ts", 1)
         _ts_fig = make_overlay_chart(_ts_channels, _egt_ts_primary, "EGT",
                                      time_col, df_view, t_range, mode, 320,
-                                     dark=True, smooth_points=smooth_points, custom_ranges=custom_ranges)
+                                     dark=True, smooth_points=_egt_smooth, custom_ranges=custom_ranges)
         if _ts_fig:
             for trace in _ts_fig.data:
                 _override_color = None
@@ -3017,6 +3027,11 @@ def show_run_analysis(
             "Change Y-axis:", _ts_channels,
             index=_ts_channels.index(_egt_ts_primary),
             key="primary_ch_egt_ts",
+        )
+        st.slider(
+            "Smoothing window", min_value=1, max_value=25, value=1, step=1,
+            key="smooth_egt_ts",
+            help="Rolling-average window in samples. 1 = no smoothing.",
         )
 
         _spread_note = (

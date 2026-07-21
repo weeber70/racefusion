@@ -50,6 +50,7 @@ from race_day_predictor import show_race_day_predictor
 from run_manager import show_run_manager
 from instructions import show_instructions
 from car_profile import show_car_profile
+from run_comparison import show_run_comparison
 from run_analysis import (
     show_run_analysis,
     load_racepak_csv, get_time_col, check_alerts, detect_shift_points, calc_rwhp,
@@ -1452,6 +1453,12 @@ if st.session_state.get("current_page") == "instructions":
 # ── Car Profile page ──────────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "car_profile":
     show_car_profile(current_user=_current_user, logo_src=_LOGO_SRC)
+    st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
+    st.stop()
+
+# ── Run Comparison page ───────────────────────────────────────────────────────
+if st.session_state.get("current_page") == "run_comparison":
+    show_run_comparison(username=_current_user, logo_src=_LOGO_SRC)
     st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
