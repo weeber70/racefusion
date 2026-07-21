@@ -5,7 +5,8 @@ import requests
 import streamlit as st
 from database import _sb, load_run, _rdp_load_run_history
 from weather import (
-    calc_density_altitude, sea_level_to_station_pressure, wind_dir_label,
+    calc_density_altitude, sea_level_to_station_pressure,
+    station_to_sea_level_pressure, wind_dir_label,
     _TRACK_OVERRIDES, _track_key, lookup_track, fetch_weather_rdp, fetch_metar,
 )
 
@@ -231,13 +232,17 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
             _mwx_temp_f   = _rdp_mwx.get("temp_f", 0)
             _mwx_rh_pct   = _rdp_mwx.get("rh_pct", 0)
             _mwx_is_altim = _rdp_mwx.get("baro_type", "station") == "altimeter"
-            # DA formula uses station pressure; convert altimeter setting → station if needed
+            # calc_density_altitude is fed WeatherKit's SEA-LEVEL-referenced
+            # pressure everywhere in the app (see _rdp_da above). To match that
+            # convention: altimeter setting passes straight through; a station
+            # (absolute) reading is converted UP to its sea-level equivalent.
+            # Humidity must be included — same as the WeatherKit path.
             if _mwx_is_altim:
-                _mwx_station_inhg = sea_level_to_station_pressure(_mwx_baro_raw, _rdp_elev_ft)
+                _mwx_slp_inhg = _mwx_baro_raw  # already sea-level referenced
             else:
-                _mwx_station_inhg = _mwx_baro_raw  # already station pressure
-            _mwx_p_hpa = _mwx_station_inhg * 33.8639  # inHg → hPa
-            _rdp_manual_da = calc_density_altitude(_mwx_temp_f, _mwx_p_hpa)
+                _mwx_slp_inhg = station_to_sea_level_pressure(_mwx_baro_raw, _rdp_elev_ft)
+            _mwx_p_hpa = _mwx_slp_inhg * 33.8639  # inHg → hPa
+            _rdp_manual_da = calc_density_altitude(_mwx_temp_f, _mwx_p_hpa, _mwx_rh_pct)
         else:
             _rdp_manual_da = None
         _rdp_pred_da = _rdp_manual_da if _rdp_manual_active else _rdp_da
@@ -264,15 +269,17 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                 "Use readings from a handheld weather station for maximum accuracy. "
                 "These override the auto-fetched weather for ET prediction."
             )
+            st.markdown("Select where your barometric pressure reading comes from:")
             _mwx_baro_type_sel = st.radio(
                 "Pressure reading type",
-                ["Uncorrected — station pressure (Kestrel / handheld barometer)",
-                 "Corrected — altimeter setting (weather app / airport report)"],
+                ["📱 Phone weather app, WeatherKit, or airport report",
+                 "📟 Kestrel or handheld barometer"],
                 index=0,
                 horizontal=True,
+                label_visibility="collapsed",
                 key="rdp_mwx_baro_type",
             )
-            _mwx_entry_is_altim = _mwx_baro_type_sel.startswith("Corrected")
+            _mwx_entry_is_altim = _mwx_baro_type_sel.startswith("📱")
 
             _mwx_c1, _mwx_c2, _mwx_c3 = st.columns(3)
             _mwx_temp = _mwx_c1.number_input(
@@ -310,13 +317,15 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                     st.session_state.pop(_k, None)
                 st.rerun()
 
-            # Live DA preview (uses values currently in the inputs)
+            # Live DA preview (uses values currently in the inputs).
+            # Same convention as the apply path: sea-level-referenced pressure
+            # + humidity, matching the WeatherKit computation exactly.
             if _mwx_baro > 0 and _mwx_rh > 0:
                 if _mwx_entry_is_altim:
-                    _preview_stn_inhg = sea_level_to_station_pressure(_mwx_baro, _rdp_elev_ft)
+                    _preview_slp_inhg = _mwx_baro  # already sea-level referenced
                 else:
-                    _preview_stn_inhg = _mwx_baro  # already station pressure
-                _preview_da = calc_density_altitude(_mwx_temp, _preview_stn_inhg * 33.8639)
+                    _preview_slp_inhg = station_to_sea_level_pressure(_mwx_baro, _rdp_elev_ft)
+                _preview_da = calc_density_altitude(_mwx_temp, _preview_slp_inhg * 33.8639, _mwx_rh)
                 if _preview_da is not None:
                     _active_badge = (
                         "<span style='background:#1a3a1a;color:#2ecc71;font-size:0.7rem;"

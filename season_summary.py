@@ -3,7 +3,7 @@ season_summary.py — RaceFusion Season Summary page.
 """
 import streamlit as st
 from datetime import datetime
-from weather import calc_density_altitude
+from database import get_effective_da
 
 
 def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = None):
@@ -247,7 +247,6 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     for _ri, _rr in enumerate(_ssm_sorted):
         _sl  = _rr["slip"]
         _rd2 = _rr["rec"].get("run_details") or {}
-        _wx2 = _rr["rec"].get("weather") or {}
         _is_best_et = (_ri == _ssm_best_et_idx)
         _is_best_rt = (_ri == _ssm_best_rt_idx)
         _is_best_60 = (_ri == _ssm_best_60_idx)
@@ -265,13 +264,9 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
         _res_icon  = {"Win": "🏆", "Loss": "❌", "Bye": "🚗"}.get(_res_val, "")
         _res_disp  = f"{_res_icon} {_res_val}" if _res_val else "—"
 
-        # DA: same source as run_analysis.py "Weather at Run Time" card —
-        # raw stored pressure_hpa + user's configured elevation from cfg.
-        _ssm_elev_ft = float(cfg.get("elev_ft") or 0)
-        _da2 = calc_density_altitude(
-            _wx2.get("temperature_f"), _wx2.get("pressure_hpa"),
-            _wx2.get("humidity_pct"), _ssm_elev_ft,
-        )
+        # DA: shared helper — da_override wins, else recomputed from raw
+        # weather (same source as the run_analysis "Weather at Run Time" card).
+        _da2 = get_effective_da(_rr["rec"])
         _da_disp = f"{int(round(_da2)):,}" if _da2 is not None else "—"
 
         # Date + time combined for display (e.g. "2026-06-13 10:34 AM")

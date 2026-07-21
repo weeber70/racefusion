@@ -449,6 +449,13 @@ def sea_level_to_station_pressure(slp_inhg: float, elevation_ft: float) -> float
     return slp_inhg * (1 - (0.0065 * elevation_m / 288.15)) ** 5.2561
 
 
+def station_to_sea_level_pressure(station_inhg: float, elevation_ft: float) -> float:
+    """Inverse of sea_level_to_station_pressure — convert absolute (uncorrected)
+    station pressure to its sea-level (altimeter setting) equivalent."""
+    elevation_m = elevation_ft * 0.3048
+    return station_inhg / (1 - (0.0065 * elevation_m / 288.15)) ** 5.2561
+
+
 def calc_density_altitude(temp_f: float | None, pressure_hpa: float | None,
                            humidity_pct: float | None = None,
                            elevation_ft: float = 0.0) -> float | None:

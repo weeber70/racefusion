@@ -581,10 +581,33 @@ def save_channel_range(user_id: str, channel_name: str, ch_min: float, ch_max: f
         pass
 
 
+def get_effective_da(run_data: dict) -> "float | None":
+    """Effective density altitude for a saved run — single source of truth.
+
+    Priority: racer-documented da_override (actual track board DA) beats the
+    weather API estimate. Fallback recomputes from raw weather values with
+    humidity, matching the Run Analysis weather card formula. Never reads
+    stored density_alt_ft (may be from an older formula).
+    """
+    # Lazy import to avoid circular dependency (weather.py imports from database.py)
+    from weather import calc_density_altitude
+    rec = run_data or {}
+    _ovr = rec.get("da_override")
+    if _ovr:
+        try:
+            return int(float(_ovr))
+        except (TypeError, ValueError):
+            pass
+    wx = rec.get("weather") or {}
+    return calc_density_altitude(
+        wx.get("temperature_f"),
+        wx.get("pressure_hpa"),
+        wx.get("humidity_pct"),
+    )
+
+
 def _rdp_load_run_history(username: str) -> list[dict]:
     """Return all runs for username that have both a valid ET and a DA."""
-    # Lazy import to avoid circular dependency (weather.py imports _sb from database.py)
-    from weather import calc_density_altitude
     if not _sb:
         return []
     try:
@@ -595,20 +618,14 @@ def _rdp_load_run_history(username: str) -> list[dict]:
     for row in rows:
         rec  = row.get("run_data") or {}
         slip = rec.get("timeslip", {}) or {}
-        wx   = rec.get("weather",  {}) or {}
         try:
             et = float(slip.get("ft_1320") or 0)
         except (TypeError, ValueError):
             continue
         if et <= 0:
             continue
-        # Always recalculate DA from raw weather values so the formula matches run view.
-        # Never read stored density_alt_ft — it may have been computed by an older formula.
-        da = calc_density_altitude(
-            wx.get("temperature_f"),
-            wx.get("pressure_hpa"),
-            wx.get("humidity_pct"),
-        )
+        # Shared helper: da_override wins, else recompute from raw weather.
+        da = get_effective_da(rec)
         if da is None:
             continue
         results.append({

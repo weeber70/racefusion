@@ -4,8 +4,8 @@ run_manager.py — RaceFusion Run Manager page.
 import re
 import streamlit as st
 from datetime import datetime
-from database import _sb, _delete_run_files
-from weather import _track_key, calc_density_altitude
+from database import _sb, _delete_run_files, get_effective_da
+from weather import _track_key
 
 
 def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, logo_src: "str | None" = None):
@@ -248,7 +248,6 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
                 _rm_fn   = _rm_run["filename"]
                 _rm_slip = _rm_run["slip"]
                 _rm_rec  = _rm_run["record"]
-                _rm_wx   = _rm_rec.get("weather") or {}
                 _rm_rd   = _rm_rec.get("run_details") or {}
 
                 _rm_r_date = _rm_run["date"] or "—"
@@ -256,11 +255,7 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
                 _rm_r_et   = _rm_slip.get("ft_1320")
                 _rm_r_spd  = _rm_slip.get("mph_1320")
                 _rm_r_res  = _rm_rd.get("result") or "—"
-                _rm_r_da   = calc_density_altitude(
-                    _rm_wx.get("temperature_f"),
-                    _rm_wx.get("pressure_hpa"),
-                    _rm_wx.get("humidity_pct"),
-                )
+                _rm_r_da   = get_effective_da(_rm_rec)
 
                 def _rm_on_row_chk(_fn=_rm_fn):
                     if st.session_state.get(f"rm_chk_{_fn}", False):

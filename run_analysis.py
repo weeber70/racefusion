@@ -27,7 +27,7 @@ from database import (
     delete_run_video, get_user_cars, create_car, _get_slip_storage_key,
     extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
     check_file_hash_duplicate, save_file_hash,
-    load_channel_ranges, save_channel_range,
+    load_channel_ranges, save_channel_range, get_effective_da,
 )
 from config import load_config, save_config
 from weather import (
@@ -1674,6 +1674,18 @@ def show_run_analysis(
                 _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash") or "",
                                 placeholder='0.016"/0.016"', key=f"rd_valve_lash_{_rk}")
 
+                # ── Density Altitude override ─────────────────────────────────────
+                st.caption("**Density Altitude (actual)**")
+                _rd_da_override = st.number_input(
+                    "DA Override (ft) — enter if you recorded actual track DA",
+                    min_value=-2000, max_value=15000,
+                    value=int(run.get("da_override") or 0), step=10,
+                    help="Manually recorded DA from the track's conditions board. "
+                         "When set, this replaces the weather API estimate everywhere "
+                         "(weather card, predictor). Set to 0 to clear and revert to API data.",
+                    key=f"rd_da_override_{_rk}",
+                )
+
                 # ── Run notes (bottom) ────────────────────────────────────────────
                 _rd_notes = st.text_area("Run notes", value=_rd.get("notes") or "",
                                 placeholder="e.g. First pass of day, track freshly prepped...", height=70,
@@ -1704,6 +1716,11 @@ def show_run_analysis(
                     _save_active_run_id = st.session_state.get("active_run_id")
                     run["run_type"] = _rd_run_type
                     run["run_details"] = _rd_payload
+                    # DA override: store as integer feet; 0/empty clears it
+                    if _rd_da_override:
+                        run["da_override"] = int(_rd_da_override)
+                    else:
+                        run.pop("da_override", None)
                     save_run(csv_name, run)
                     if _rd_update_profile:
                         cfg["car_profile"] = {k: v for k, v in _rd_payload.items() if k != "notes"}
@@ -1731,29 +1748,44 @@ def show_run_analysis(
     # ── Right: Changes from last run (auto-diff) ──────────────────────────────────
     with _main_right:
         with st.expander("🔄 Changes from last run", expanded=False):
-            # Find the most recent earlier run for the same user+car (or just user if no car).
-            # Uses created_at ordering — same as listsaved_runs().
+            # Find the CHRONOLOGICALLY previous run for the same user+car (or just
+            # user if no car) — ordered by the run's actual date (timeslip.date),
+            # then time of day, with created_at only as a final tiebreak.
+            # There is no run_date column; the date lives in run_data JSONB, so
+            # ordering is done client-side. Session state / load order is never used.
             _diff_prev_rd: dict = {}
             _is_first_run = False
             if _sb:
                 try:
-                    _cur_ts_rows = _sb.table("runs").select("created_at") \
-                        .eq("username", current_user).eq("csv_filename", csv_name).execute().data
-                    _cur_ts = _cur_ts_rows[0]["created_at"] if _cur_ts_rows else None
-                    if _cur_ts:
-                        if _run_car_id:
-                            _prev_rows = _sb.table("runs").select("run_data") \
-                                .eq("username", current_user) \
-                                .eq("car_id", _run_car_id) \
-                                .lt("created_at", _cur_ts) \
-                                .order("created_at", desc=True).limit(1).execute().data
-                        else:
-                            _prev_rows = _sb.table("runs").select("run_data") \
-                                .eq("username", current_user) \
-                                .lt("created_at", _cur_ts) \
-                                .order("created_at", desc=True).limit(1).execute().data
-                        if _prev_rows:
-                            _diff_prev_rd = (_prev_rows[0].get("run_data") or {}).get("run_details") or {}
+                    _prev_q = _sb.table("runs").select("csv_filename,run_data,created_at") \
+                        .eq("username", current_user)
+                    if _run_car_id:
+                        _prev_q = _prev_q.eq("car_id", _run_car_id)
+                    _all_rows = _prev_q.execute().data or []
+
+                    def _chrono_key(_row):
+                        _s = ((_row.get("run_data") or {}).get("timeslip")) or {}
+                        return (
+                            _s.get("date") or "0000-00-00",
+                            _s.get("time") or "00:00:00",
+                            _row.get("created_at") or "",
+                        )
+
+                    _cur_row = next(
+                        (r for r in _all_rows if r.get("csv_filename") == csv_name), None
+                    )
+                    if _cur_row is not None:
+                        _cur_key = _chrono_key(_cur_row)
+                        _earlier = [
+                            r for r in _all_rows
+                            if r.get("csv_filename") != csv_name
+                            and _chrono_key(r) < _cur_key
+                        ]
+                        if _earlier:
+                            _prev_row = max(_earlier, key=_chrono_key)
+                            _diff_prev_rd = (
+                                (_prev_row.get("run_data") or {}).get("run_details") or {}
+                            )
                         else:
                             _is_first_run = True
                 except Exception:
@@ -2629,45 +2661,65 @@ def show_run_analysis(
                                     st.error(f"Scan failed: {_fix_err}")
 
         # ── Weather card
-        if wx:
+        _da_override = run.get("da_override")
+        if wx or _da_override:
             with right:
+                wx = wx or {}
                 temp = wx.get("temperature_f")
                 hum = wx.get("humidity_pct")
                 pres = wx.get("pressure_hpa")
-                wind = wx.get("windspeed_mph")
-                wdir = wind_dir_label(wx.get("wind_dir_deg"))
                 wx_date = run.get("weather_date", "")
                 wx_loc = run.get("weather_location", "")
 
-                _wx_elev  = float(cfg.get("elev_ft") or 0)
                 pres_inhg = pres * 0.02953 if pres else None
-                da        = calc_density_altitude(temp, pres, hum, _wx_elev)
+                # Shared helper: da_override wins, else recompute from raw weather
+                da = get_effective_da(run)
                 da_str    = f"{da:,.0f} ft" if da is not None else "—"
                 da_color  = "#ff6b6b" if (da or 0) > 2000 else "#60c0f0" if (da or 0) < 500 else "#f0c040"
                 da_note   = "thin air"   if (da or 0) > 2000 else "good air" if (da or 0) < 500 else "average air"
 
-                _v_temp = f"{temp:.1f} °F"         if temp      is not None else "—"
-                _v_hum  = f"{hum:.0f}%"            if hum       is not None else "—"
-                _v_pres = f"{pres_inhg:.2f} inHg"  if pres_inhg is not None else "—"
-                _v_wind = f"💨 {wind:.1f} mph {wdir}" if wind  is not None else "—"
+                # When DA is racer-documented, hide the API estimate rows
+                # (Temp/Humidity/Baro) — they are not the basis for this DA.
+                if _da_override:
+                    _da_badge = (
+                        ' <span style="background:rgba(255,165,0,0.18);color:#FFA500;'
+                        'border:1px solid #FFA500;border-radius:4px;padding:1px 6px;'
+                        'font-size:0.68rem;font-weight:600;vertical-align:middle;">'
+                        '📋 Racer-documented</span>'
+                    )
+                    _wx_rows = ""
+                    da_note = "📋 DA entered manually in Run Details"
+                else:
+                    _da_badge = ""
+                    _v_temp = f"{temp:.1f} °F"         if temp      is not None else "—"
+                    _v_hum  = f"{hum:.0f}%"            if hum       is not None else "—"
+                    _v_pres = f"{pres_inhg:.2f} inHg"  if pres_inhg is not None else "—"
+                    _wx_rows = (
+                        f'<tr><td style="color:#888;padding:3px 0;">Temperature</td><td style="color:#eee;text-align:right;">{_v_temp}</td></tr>'
+                        f'<tr><td style="color:#888;padding:3px 0;">Humidity</td><td style="color:#eee;text-align:right;">{_v_hum}</td></tr>'
+                        f'<tr><td style="color:#888;padding:3px 0;">Barometric Pressure</td><td style="color:#eee;text-align:right;">{_v_pres}</td></tr>'
+                    )
 
-                st.markdown(f"""
-    <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;">
-      <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:4px;">🌤️ Weather at Run Time</div>
-      <div style="color:#666;font-size:0.8rem;margin-bottom:12px;">{wx_date} &nbsp;·&nbsp; {wx_loc}</div>
-      <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">
-        <tr><td style="color:#888;padding:3px 0;">Temperature</td><td style="color:#eee;text-align:right;">{_v_temp}</td></tr>
-        <tr><td style="color:#888;padding:3px 0;">Humidity</td><td style="color:#eee;text-align:right;">{_v_hum}</td></tr>
-        <tr><td style="color:#888;padding:3px 0;">Barometric Pressure</td><td style="color:#eee;text-align:right;">{_v_pres}</td></tr>
-        <tr><td style="color:#888;padding:3px 0;">Wind</td><td style="color:#eee;text-align:right;">{_v_wind}</td></tr>
-        <tr><td style="color:#cc1111;font-weight:700;padding:6px 0 3px;">Density Altitude</td><td style="color:{da_color};font-weight:700;font-size:1.1rem;text-align:right;">{da_str}</td></tr>
-      </table>
-      <div style="color:#666;font-size:0.75rem;margin-top:8px;">{da_note}</div>
-    </div>
-    """, unsafe_allow_html=True)
+                # Single-line HTML string — a blank/whitespace line inside the
+                # markup (e.g. when _wx_rows is empty) would end the CommonMark
+                # HTML block and dump the rest as a raw code block.
+                _wx_card_html = (
+                    '<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;">'
+                    '<div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:4px;">🌤️ Weather at Run Time</div>'
+                    f'<div style="color:#666;font-size:0.8rem;margin-bottom:12px;">{wx_date} &nbsp;·&nbsp; {wx_loc}</div>'
+                    '<table style="width:100%;border-collapse:collapse;font-size:0.92rem;">'
+                    f'{_wx_rows}'
+                    f'<tr><td style="color:#cc1111;font-weight:700;padding:6px 0 3px;">Density Altitude{_da_badge}</td>'
+                    f'<td style="color:{da_color};font-weight:700;font-size:1.1rem;text-align:right;">{da_str}</td></tr>'
+                    '</table>'
+                    f'<div style="color:#666;font-size:0.75rem;margin-top:8px;">{da_note}</div>'
+                    '</div>'
+                )
+                st.markdown(_wx_card_html, unsafe_allow_html=True)
 
-            # Attribution in a new row below the card pair — right column only
-            _wx_source = wx.get("_source", "")
+            # Attribution in a new row below the card pair — right column only.
+            # Hidden when DA is racer-documented (API data isn't shown).
+            _wx_source = "" if _da_override else wx.get("_source", "")
             if _wx_source:
                 _, _weather_caption_col = st.columns([1, 1])
                 with _weather_caption_col:
