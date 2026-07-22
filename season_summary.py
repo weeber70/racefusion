@@ -4,6 +4,8 @@ season_summary.py — RaceFusion Season Summary page.
 import streamlit as st
 from datetime import datetime
 from database import get_effective_da
+from weather import canonical_track, _auto_track_key, build_track_display_map
+from config import save_config
 
 
 def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = None):
@@ -343,25 +345,39 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Runs by Track ─────────────────────────────────────────────────────────
+    # Grouped by canonical track identity: auto-normalization ("at <place>"
+    # suffixes, case, punctuation) + the user's manual merges. Raw timeslip
+    # text on each run is never modified.
+    _ssm_aliases = cfg.get("track_aliases", {}) or {}
+    # One consistent display name per canonical track (shared with Run Manager)
+    _ssm_track_disp = build_track_display_map(
+        ((r["slip"].get("track_name") or r["slip"].get("track_location") or "")
+         for r in _ssm_runs),
+        _ssm_aliases,
+    )
     _ssm_track_map: dict = {}
     for r in _ssm_runs:
-        _tk = (r["slip"].get("track_name") or r["slip"].get("track_location") or "Unknown").strip().title() or "Unknown"
-        if _tk not in _ssm_track_map:
-            _ssm_track_map[_tk] = {"runs": 0, "ets": []}
-        _ssm_track_map[_tk]["runs"] += 1
+        _raw_t = (r["slip"].get("track_name") or r["slip"].get("track_location") or "").strip()
+        if _raw_t:
+            _ck = canonical_track(_raw_t, _ssm_aliases)[0]
+            _cd = _ssm_track_disp.get(_ck, _raw_t.title())
+        else:
+            _ck, _cd = "unknown", "Unknown"
+        _ent = _ssm_track_map.setdefault(_ck, {"name": _cd or "Unknown", "runs": 0, "ets": []})
+        _ent["runs"] += 1
         _et_v = r["slip"].get("ft_1320")   # ET stored as ft_1320
         if _et_v is not None:
             try:
-                _ssm_track_map[_tk]["ets"].append(float(_et_v))
+                _ent["ets"].append(float(_et_v))
             except (ValueError, TypeError):
                 pass
 
     _ssm_track_rows_html = ""
-    for _tk, _td in sorted(_ssm_track_map.items(), key=lambda x: -x[1]["runs"]):
+    for _ck, _td in sorted(_ssm_track_map.items(), key=lambda x: -x[1]["runs"]):
         _best = f"{min(_td['ets']):.3f}s" if _td["ets"] else "—"
         _ssm_track_rows_html += (
             f'<tr>'
-            f'<td style="color:#eee;padding:5px 12px 5px 0;">{_tk}</td>'
+            f'<td style="color:#eee;padding:5px 12px 5px 0;">{_td["name"]}</td>'
             f'<td style="color:#aaa;text-align:center;padding:5px 12px;">{_td["runs"]}</td>'
             f'<td style="color:#ffcc00;font-weight:700;text-align:right;padding:5px 0;">{_best}</td>'
             f'</tr>'
@@ -385,6 +401,59 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     <tbody>{_ssm_track_rows_html}</tbody>
   </table>
 </div>""", unsafe_allow_html=True)
+
+    # ── Track merge tool ──────────────────────────────────────────────────────
+    with st.expander("🔀 Merge duplicate tracks"):
+        st.caption(
+            "Merge two track entries that are the same physical venue "
+            "(e.g. \"Lucas Oil Raceway Park\" and \"Lucas Oil Raceway Park At "
+            "Indianapolis\"). Merging only changes how runs are grouped and "
+            "labelled — the raw text on each run's timeslip is never modified."
+        )
+        _ssm_all_tracks = sorted(
+            {v["name"] for v in _ssm_track_map.values() if v["name"] != "Unknown"}
+        )
+        _mg_c1, _mg_c2 = st.columns(2)
+        _merge_src = _mg_c1.selectbox(
+            "Merge this track…", [""] + _ssm_all_tracks, key="ssm_merge_src"
+        )
+        _merge_dst = _mg_c2.selectbox(
+            "…into this track", [""] + _ssm_all_tracks, key="ssm_merge_dst"
+        )
+        _merge_ok = bool(
+            _merge_src and _merge_dst
+            and _auto_track_key(_merge_src) != _auto_track_key(_merge_dst)
+        )
+        if st.button("🔀 Merge tracks", key="ssm_merge_btn", type="primary",
+                     disabled=not _merge_ok):
+            _aliases = cfg.get("track_aliases", {}) or {}
+            _aliases[_auto_track_key(_merge_src)] = _merge_dst
+            # Re-point any existing merges that targeted the source track so
+            # chains always resolve in a single hop.
+            for _ak, _av in list(_aliases.items()):
+                if _auto_track_key(_av) == _auto_track_key(_merge_src):
+                    _aliases[_ak] = _merge_dst
+            cfg["track_aliases"] = _aliases
+            save_config(cfg)
+            st.success(f"Merged \"{_merge_src}\" into \"{_merge_dst}\".")
+            st.rerun()
+
+        _ssm_active_aliases = cfg.get("track_aliases", {}) or {}
+        if _ssm_active_aliases:
+            st.markdown("**Active merges:**")
+            for _ak in sorted(_ssm_active_aliases):
+                _av = _ssm_active_aliases[_ak]
+                _un_c1, _un_c2 = st.columns([5, 1])
+                _un_c1.markdown(
+                    f"<span style='color:#888;'>{_ak.title()}</span> → "
+                    f"<strong>{_av}</strong>",
+                    unsafe_allow_html=True,
+                )
+                if _un_c2.button("Undo", key=f"ssm_unmerge_{_ak}"):
+                    _ssm_active_aliases.pop(_ak, None)
+                    cfg["track_aliases"] = _ssm_active_aliases
+                    save_config(cfg)
+                    st.rerun()
 
     st.markdown(
         "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"

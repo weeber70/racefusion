@@ -86,14 +86,9 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
         key="cp_race_class",
     )
 
-    _wt_c1, _wt_c2 = st.columns(2)
-    _f_wt_w  = _wt_c1.text_input(
+    _f_wt_w = st.text_input(
         "Weight with driver (lbs)", value=_g("weight_with_driver"),
         placeholder="e.g. 2450", key="cp_wt_w",
-    )
-    _f_wt_wo = _wt_c2.text_input(
-        "Weight without driver (lbs)", value=_g("weight_without_driver"),
-        placeholder="e.g. 2250", key="cp_wt_wo",
     )
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -318,24 +313,8 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
         index=_ign_sys_opts.index(_opt("ignition_system", _ign_sys_opts)),
         key="cp_ign_sys",
     )
-    _ign_c1, _ign_c2 = st.columns(2)
-    _f_ign_init = _ign_c1.text_input(
-        "Initial timing (degrees)", value=_g("timing_initial"),
-        placeholder="e.g. 16", key="cp_ign_initial",
-    )
-    _f_ign_total = _ign_c2.text_input(
-        "Total timing (degrees)", value=_g("timing_total"),
-        placeholder="e.g. 34", key="cp_ign_total",
-    )
-    _ign_c3, _ign_c4 = st.columns(2)
-    _f_plug_brand = _ign_c3.text_input(
-        "Spark plug brand", value=_g("spark_plug_brand"),
-        placeholder="e.g. NGK, Autolite, Denso", key="cp_plug_brand",
-    )
-    _f_plug_heat = _ign_c4.text_input(
-        "Heat range", value=_g("spark_plug_heat_range"),
-        placeholder="e.g. R5671A-8", key="cp_plug_heat",
-    )
+    # Timing, spark plug, and gap live in Run Details (Ignition) —
+    # they change run-to-run. Only the ignition box itself is static.
 
     # ═════════════════════════════════════════════════════════════════════════
     # DRIVETRAIN
@@ -408,18 +387,10 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
     # TIRES & WHEELS
     # ═════════════════════════════════════════════════════════════════════════
     st.subheader("Tires & Wheels")
-    _tire_c1, _tire_c2, _tire_c3 = st.columns(3)
-    _f_front_tire = _tire_c1.text_input(
+    # Rear tire + rollout live in Run Details — they can change mid-weekend.
+    _f_front_tire = st.text_input(
         "Front tire size", value=_g("front_tire_size"),
         placeholder="e.g. 26x4.5-15", key="cp_front_tire",
-    )
-    _f_rear_slick = _tire_c2.text_input(
-        "Rear slick size", value=_g("rear_slick_size"),
-        placeholder="e.g. 36 x 17 - 16", key="cp_rear_slick",
-    )
-    _f_rollout = _tire_c3.text_input(
-        "Rollout (inches)", value=_g("rollout_inches"),
-        placeholder="e.g. 90.5", key="cp_rollout",
     )
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -461,7 +432,6 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
             "model":                 _f_model.strip(),
             "race_class":            _f_class.strip(),
             "weight_with_driver":    _f_wt_w.strip(),
-            "weight_without_driver": _f_wt_wo.strip(),
             # Engine
             "displacement":          _f_disp.strip(),
             "block_material":        _f_block,
@@ -525,12 +495,8 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
             "fuel_type":             _f_fuel_type,
             "fuel_pump":             _f_fuel_pump.strip(),
             "fuel_pressure_psi":     _f_fuel_psi.strip(),
-            # Ignition
+            # Ignition (timing, spark plug + gap live in Run Details — run-to-run)
             "ignition_system":       _f_ign_sys,
-            "timing_initial":        _f_ign_init.strip(),
-            "timing_total":          _f_ign_total.strip(),
-            "spark_plug_brand":      _f_plug_brand.strip(),
-            "spark_plug_heat_range": _f_plug_heat.strip(),
             # Drivetrain
             "transmission_type":     _f_trans,
             "num_gears":             _f_num_gears,
@@ -539,10 +505,8 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
             "stall_rpm":             _f_stall.strip(),
             "rear_gear_ratio":       _f_rear_ratio.strip(),
             "rear_end_type":         _f_rear_end,
-            # Tires & Wheels
+            # Tires & Wheels (rear tire + rollout live in Run Details)
             "front_tire_size":       _f_front_tire.strip(),
-            "rear_slick_size":       _f_rear_slick.strip(),
-            "rollout_inches":        _f_rollout.strip(),
             # Chassis & Suspension
             "rear_suspension":       _f_rear_susp,
             "front_suspension":      _f_front_susp,

@@ -28,6 +28,7 @@ from database import (
     extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
     check_file_hash_duplicate, save_file_hash,
     load_channel_ranges, save_channel_range, get_effective_da,
+    load_car_build_sheet,
 )
 from config import load_config, save_config
 from weather import (
@@ -226,7 +227,9 @@ def show_run_analysis(
     # ── Values that were global in app.py before the Phase 2 split ───────────────
     api_key = _get_secret("ANTHROPIC_API_KEY")
     car_number_input = cfg.get("car_number", "")
-    weight_input = int(cfg.get("car_weight_lbs", 2500))
+    # Legacy fallback only — re-resolved per-run (snapshot → build sheet →
+    # legacy cfg) once the run record is loaded. 0 = not set, never a default.
+    weight_input = int(cfg.get("car_weight_lbs", 0) or 0)
 
     # ── Main area ─────────────────────────────────────────────────────────────────
 
@@ -1450,6 +1453,20 @@ def show_run_analysis(
         except Exception:
             pass
 
+    # ── Effective car weight (lbs w/ driver) for RWHP / G-force calcs ────────────
+    # Priority: run's car_snapshot (race-time) → current cars.build_sheet →
+    # legacy cfg["car_weight_lbs"]. No silent default — 0 means "not set" and
+    # the RWHP cards show a prompt instead of computing from a placeholder.
+    _w_raw = (run.get("car_snapshot") or {}).get("weight_with_driver")
+    if not _w_raw and _run_car_id:
+        _w_raw = load_car_build_sheet(_run_car_id).get("weight_with_driver")
+    if not _w_raw:
+        _w_raw = cfg.get("car_weight_lbs")
+    try:
+        weight_input = int(float(str(_w_raw).replace(",", "").strip())) if _w_raw else 0
+    except (TypeError, ValueError):
+        weight_input = 0
+
     # ── Run header: car name ─────────────────────────────────────────────────────
     st.markdown("<div style='margin-top:24px'></div>", unsafe_allow_html=True)
     if _run_car_name:
@@ -1608,17 +1625,58 @@ def show_run_analysis(
                     key=f"rd_run_type_{_rk}",
                 )
 
+                # ── Density Altitude override ─────────────────────────────────────
+                st.caption("**Density Altitude (actual)**")
+                _rd_da_override = st.number_input(
+                    "DA Override (ft) — enter if you recorded actual track DA",
+                    min_value=-2000, max_value=15000,
+                    value=int(run.get("da_override") or 0), step=10,
+                    help="Manually recorded DA from the track's conditions board. "
+                         "When set, this replaces the weather API estimate everywhere "
+                         "(weather card, predictor). Set to 0 to clear and revert to API data.",
+                    key=f"rd_da_override_{_rk}",
+                )
+
+                # ── Delay Box ─────────────────────────────────────────────────────
+                st.caption("**Delay Box (sec)**")
+                _rd_delay_box = st.number_input(
+                    "Delay Box (sec) — as documented on your timeslip",
+                    min_value=0.0, max_value=2.0,
+                    # Run's own value wins; falls back to the saved default
+                    # setup (carries over like other static setup fields)
+                    value=float(
+                        run.get("delay_box")
+                        or cfg.get("car_profile", {}).get("delay_box")
+                        or 0.0
+                    ),
+                    step=0.001, format="%.3f",
+                    help="Programmed delay box setting for this run (bracket/index "
+                         "racing) — affects reaction time interpretation. "
+                         "Leave 0.000 if you don't run a delay box.",
+                    key=f"rd_delay_box_{_rk}",
+                )
+
                 # ── Tire Pressures ────────────────────────────────────────────────
                 st.caption("**Tire Pressures (psi)**")
                 _rd_col1, _rd_col2 = st.columns(2)
                 _rd_tire_fl = _rd_col1.number_input("FL", min_value=0.0, max_value=60.0,
-                                value=float(_rd.get("tire_pressure_fl") or 0.0), step=0.5, format="%.1f", key=f"rd_fl_{_rk}")
+                                value=float(_rd.get("tire_pressure_fl") or 0.0), step=0.01, format="%.2f", key=f"rd_fl_{_rk}")
                 _rd_tire_fr = _rd_col2.number_input("FR", min_value=0.0, max_value=60.0,
-                                value=float(_rd.get("tire_pressure_fr") or 0.0), step=0.5, format="%.1f", key=f"rd_fr_{_rk}")
+                                value=float(_rd.get("tire_pressure_fr") or 0.0), step=0.01, format="%.2f", key=f"rd_fr_{_rk}")
                 _rd_tire_rl = _rd_col1.number_input("RL", min_value=0.0, max_value=60.0,
-                                value=float(_rd.get("tire_pressure_rl") or 0.0), step=0.5, format="%.1f", key=f"rd_rl_{_rk}")
+                                value=float(_rd.get("tire_pressure_rl") or 0.0), step=0.01, format="%.2f", key=f"rd_rl_{_rk}")
                 _rd_tire_rr = _rd_col2.number_input("RR", min_value=0.0, max_value=60.0,
-                                value=float(_rd.get("tire_pressure_rr") or 0.0), step=0.5, format="%.1f", key=f"rd_rr_{_rk}")
+                                value=float(_rd.get("tire_pressure_rr") or 0.0), step=0.01, format="%.2f", key=f"rd_rr_{_rk}")
+
+                # ── Rear Tire & Rollout (can change mid-weekend) ──────────────────
+                st.caption("**Rear Tire**")
+                _rd_col_rt1, _rd_col_rt2 = st.columns(2)
+                _rd_rear_tire = _rd_col_rt1.text_input("Rear tire size",
+                                value=_rd.get("rear_tire_size") or "",
+                                placeholder="e.g. 36 x 17 - 16", key=f"rd_rear_tire_{_rk}")
+                _rd_rollout = _rd_col_rt2.text_input("Rollout (inches)",
+                                value=_rd.get("rollout_inches") or "",
+                                placeholder="e.g. 90.5", key=f"rd_rollout_{_rk}")
 
                 # ── Track / Tire Conditions ───────────────────────────────────────
                 st.caption("**Track / Tire Conditions**")
@@ -1673,18 +1731,13 @@ def show_run_analysis(
                                 placeholder='0.016"', key=f"rd_plug_gap_{_rk}")
                 _rd_valve_lash = _rd_col14.text_input("Lash INT/EXT", value=_rd.get("valve_lash") or "",
                                 placeholder='0.016"/0.016"', key=f"rd_valve_lash_{_rk}")
-
-                # ── Density Altitude override ─────────────────────────────────────
-                st.caption("**Density Altitude (actual)**")
-                _rd_da_override = st.number_input(
-                    "DA Override (ft) — enter if you recorded actual track DA",
-                    min_value=-2000, max_value=15000,
-                    value=int(run.get("da_override") or 0), step=10,
-                    help="Manually recorded DA from the track's conditions board. "
-                         "When set, this replaces the weather API estimate everywhere "
-                         "(weather card, predictor). Set to 0 to clear and revert to API data.",
-                    key=f"rd_da_override_{_rk}",
-                )
+                _rd_col15, _rd_col16 = st.columns(2)
+                _rd_timing_init  = _rd_col15.text_input("Initial Timing (°)",
+                                value=_rd.get("initial_timing_deg") or "",
+                                placeholder="e.g. 16", key=f"rd_timing_init_{_rk}")
+                _rd_timing_total = _rd_col16.text_input("Total Timing (°)",
+                                value=_rd.get("total_timing_deg") or "",
+                                placeholder="e.g. 34", key=f"rd_timing_total_{_rk}")
 
                 # ── Run notes (bottom) ────────────────────────────────────────────
                 _rd_notes = st.text_area("Run notes", value=_rd.get("notes") or "",
@@ -1694,6 +1747,8 @@ def show_run_analysis(
                 _rd_payload = {
                     "tire_pressure_fl": _rd_tire_fl,  "tire_pressure_fr": _rd_tire_fr,
                     "tire_pressure_rl": _rd_tire_rl,  "tire_pressure_rr": _rd_tire_rr,
+                    "rear_tire_size":   _rd_rear_tire.strip(),
+                    "rollout_inches":   _rd_rollout.strip(),
                     "track_temp_f":     _rd_track_temp, "tire_temp_f":    _rd_tire_temp,
                     "launch_rpm":       _rd_launch_rpm,  "shift_point":   _rd_shift_point,
                     "main_jet":         _rd_main_jet,    "hs_jet":        _rd_hs_jet,
@@ -1702,6 +1757,8 @@ def show_run_analysis(
                     "overdrive":        _rd_overdrive,
                     "wheelie_bar_d":    _rd_wb_d,        "wheelie_bar_p": _rd_wb_p,
                     "spark_plug":       _rd_spark_plug,  "plug_gap":      _rd_plug_gap,
+                    "initial_timing_deg": _rd_timing_init.strip(),
+                    "total_timing_deg":   _rd_timing_total.strip(),
                     "valve_lash":       _rd_valve_lash,  "notes":         _rd_notes,
                     "result":           _rd_result,
                 }
@@ -1721,9 +1778,18 @@ def show_run_analysis(
                         run["da_override"] = int(_rd_da_override)
                     else:
                         run.pop("da_override", None)
+                    # Delay box: store in seconds; 0/empty clears it (optional field)
+                    if _rd_delay_box:
+                        run["delay_box"] = round(float(_rd_delay_box), 3)
+                    else:
+                        run.pop("delay_box", None)
                     save_run(csv_name, run)
                     if _rd_update_profile:
                         cfg["car_profile"] = {k: v for k, v in _rd_payload.items() if k != "notes"}
+                        # Delay box carries over as part of the default setup.
+                        # DA override intentionally does NOT — it's run/track-specific.
+                        if _rd_delay_box:
+                            cfg["car_profile"]["delay_box"] = round(float(_rd_delay_box), 3)
                         save_config(cfg)
                         st.success("Run saved and default setup updated! ✅")
                     else:
@@ -1748,55 +1814,57 @@ def show_run_analysis(
     # ── Right: Changes from last run (auto-diff) ──────────────────────────────────
     with _main_right:
         with st.expander("🔄 Changes from last run", expanded=False):
-            # Find the CHRONOLOGICALLY previous run for the same user+car (or just
-            # user if no car) — ordered by the run's actual date (timeslip.date),
-            # then time of day, with created_at only as a final tiebreak.
-            # There is no run_date column; the date lives in run_data JSONB, so
-            # ordering is done client-side. Session state / load order is never used.
+            # Find the CHRONOLOGICALLY previous run for the same user+car (or
+            # just user if no car), server-side via the run_date column
+            # (populated from timeslip date+time at save time; see the
+            # 2026-07-21_add_run_date.sql migration). Session state / load
+            # order is never used.
             _diff_prev_rd: dict = {}
+            _diff_prev_rec: dict = {}   # full previous run_data (delay_box lives here)
+            _prev_found = False
             _is_first_run = False
             if _sb:
                 try:
-                    _prev_q = _sb.table("runs").select("csv_filename,run_data,created_at") \
+                    _cur_rows = _sb.table("runs").select("run_date,created_at") \
+                        .eq("username", current_user).eq("csv_filename", csv_name) \
+                        .execute().data
+                    _cur_run_date = _cur_rows[0].get("run_date") if _cur_rows else None
+                    _cur_created  = _cur_rows[0].get("created_at") if _cur_rows else None
+
+                    _prev_q = _sb.table("runs").select("run_data") \
                         .eq("username", current_user)
                     if _run_car_id:
                         _prev_q = _prev_q.eq("car_id", _run_car_id)
-                    _all_rows = _prev_q.execute().data or []
 
-                    def _chrono_key(_row):
-                        _s = ((_row.get("run_data") or {}).get("timeslip")) or {}
-                        return (
-                            _s.get("date") or "0000-00-00",
-                            _s.get("time") or "00:00:00",
-                            _row.get("created_at") or "",
-                        )
+                    if _cur_run_date:
+                        # ORDER BY run_date DESC, take the newest strictly before
+                        _prev_rows = _prev_q.lt("run_date", _cur_run_date) \
+                            .order("run_date", desc=True).limit(1).execute().data
+                    elif _cur_created:
+                        # Run has no parseable timeslip date — fall back to
+                        # upload order so the diff still works.
+                        _prev_rows = _prev_q.lt("created_at", _cur_created) \
+                            .order("created_at", desc=True).limit(1).execute().data
+                    else:
+                        _prev_rows = None
 
-                    _cur_row = next(
-                        (r for r in _all_rows if r.get("csv_filename") == csv_name), None
-                    )
-                    if _cur_row is not None:
-                        _cur_key = _chrono_key(_cur_row)
-                        _earlier = [
-                            r for r in _all_rows
-                            if r.get("csv_filename") != csv_name
-                            and _chrono_key(r) < _cur_key
-                        ]
-                        if _earlier:
-                            _prev_row = max(_earlier, key=_chrono_key)
-                            _diff_prev_rd = (
-                                (_prev_row.get("run_data") or {}).get("run_details") or {}
-                            )
-                        else:
-                            _is_first_run = True
+                    if _prev_rows:
+                        _prev_found = True
+                        _diff_prev_rec = _prev_rows[0].get("run_data") or {}
+                        _diff_prev_rd  = _diff_prev_rec.get("run_details") or {}
+                    elif _cur_run_date or _cur_created:
+                        _is_first_run = True
                 except Exception:
                     pass
 
             # Field definitions: (run_details key, display label, printf format or None for strings)
             _DIFF_FIELDS = [
-                ("tire_pressure_fl", "Tire Pressure FL", "%.1f"),
-                ("tire_pressure_fr", "Tire Pressure FR", "%.1f"),
-                ("tire_pressure_rl", "Tire Pressure RL", "%.1f"),
-                ("tire_pressure_rr", "Tire Pressure RR", "%.1f"),
+                ("tire_pressure_fl", "Tire Pressure FL", "%.2f"),
+                ("tire_pressure_fr", "Tire Pressure FR", "%.2f"),
+                ("tire_pressure_rl", "Tire Pressure RL", "%.2f"),
+                ("tire_pressure_rr", "Tire Pressure RR", "%.2f"),
+                ("rear_tire_size",   "Rear Tire",        None),
+                ("rollout_inches",   "Rollout (in)",     None),
                 ("track_temp_f",     "Track Temp (°F)",  "%.0f"),
                 ("tire_temp_f",      "Tire Temp (°F)",   "%.0f"),
                 ("launch_rpm",       "Launch RPM",        "%.0f"),
@@ -1810,6 +1878,8 @@ def show_run_analysis(
                 ("wheelie_bar_p",    "Wheelie Bar P",     "%.3f"),
                 ("spark_plug",       "Spark Plug",        None),
                 ("plug_gap",         "Plug Gap",          None),
+                ("initial_timing_deg", "Initial Timing (°)", None),
+                ("total_timing_deg",   "Total Timing (°)",   None),
                 ("valve_lash",       "Valve Lash",        None),
             ]
 
@@ -1826,7 +1896,7 @@ def show_run_analysis(
 
             if _is_first_run:
                 st.caption("Baseline run — no previous run to compare.")
-            elif not _diff_prev_rd:
+            elif not _prev_found:
                 st.caption("No previous run found to compare.")
             else:
                 _diffs = []
@@ -1836,6 +1906,14 @@ def show_run_analysis(
                     if _cur_s == _prv_s or (not _cur_s and not _prv_s):
                         continue
                     _diffs.append((_flabel, _prv_s or "—", _cur_s or "—"))
+
+                # Delay Box lives at the run_data level, not in run_details —
+                # compare it explicitly. (DA is intentionally excluded: it's an
+                # environmental condition, not a setup change.)
+                _cur_db = _diff_fmt(run.get("delay_box"), "%.3f")
+                _prv_db = _diff_fmt(_diff_prev_rec.get("delay_box"), "%.3f")
+                if _cur_db != _prv_db and (_cur_db or _prv_db):
+                    _diffs.append(("Delay Box (sec)", _prv_db or "—", _cur_db or "—"))
                 if _diffs:
                     for _dlabel, _d_from, _d_to in _diffs:
                         st.markdown(
@@ -1972,42 +2050,77 @@ def show_run_analysis(
                     "wind":         s.get("wind"),
                 },
                 "run_details":   p_rd,
+                "delay_box_sec": rec.get("delay_box"),
                 "channel_stats": p_ch,
                 "changelog":     rec.get("changelog", []),
                 "notes":         p_rd.get("notes", ""),
             })
 
         # ── Car profile ───────────────────────────────────────────────────────────
-        _gr = car_cfg.get("gear_ratios", {})
-        _num_g = int(car_cfg.get("num_gears", 2))
-        _gear_ratio_list = {
-            ["1st","2nd","3rd","4th","5th","6th"][i]: _gr.get(str(i+1)) or "NOT SET"
-            for i in range(_num_g)
-        }
-        # Flag missing specs so the AI can call them out
-        def _ms(val, label):
-            """Return value or a sentinel that tells the AI the field is missing."""
-            return val if val else f"NOT SET — {label} missing, analysis limited"
+        # Source priority:
+        #   1. run_data['car_snapshot'] — config as it was when the run was made
+        #   2. current cars.build_sheet via the run's car_id
+        #   3. legacy flat keys in user_configs (pre-Car-Profile-page accounts)
+        _car_specs = run_rec.get("car_snapshot") or {}
+        _specs_source = "car_snapshot (config at race time)" if _car_specs else ""
+        if not _car_specs:
+            _bs_cid = ""
+            if _sb:
+                try:
+                    _cid_rows = _sb.table("runs").select("car_id") \
+                        .eq("username", current_user).eq("csv_filename", csv_name) \
+                        .execute().data
+                    _bs_cid = (_cid_rows[0].get("car_id") or "") if _cid_rows else ""
+                except Exception:
+                    _bs_cid = ""
+            if _bs_cid:
+                _car_specs = load_car_build_sheet(_bs_cid)
+                if _car_specs:
+                    _specs_source = "current build sheet (no race-time snapshot saved)"
 
-        car_profile = {
-            "sanctioning_body": _ms(car_cfg.get("sanctioning_body", ""), "sanctioning body (NHRA/IHRA/NMCA/etc.) — needed to apply correct rulebook"),
-            "class_name":       _ms(car_cfg.get("class_name", ""), "class name — needed to determine index, dial-in rules, and performance limits"),
-            "engine":          _ms(car_cfg.get("engine_desc",""), "engine displacement/type"),
-            "fuel_type":       _ms(car_cfg.get("fuel_type",""), "fuel type — critical for EGT range, fuel flow, and power interpretation"),
-            "carburetor":      _ms(car_cfg.get("carb_desc",""), "carburetor/fuel system"),
-            "blower_type":     _ms(car_cfg.get("blower_type",""), "blower type (roots/screw)"),
-            "blower_style":    _ms(car_cfg.get("blower_style",""), "blower rotor style"),
-            "blower_size":     _ms(car_cfg.get("blower_size",""), "blower case size e.g. 14-71"),
-            "converter":       _ms(car_cfg.get("converter_desc",""), "converter stall speed and type"),
-            "transmission":    _ms(car_cfg.get("transmission",""), "transmission type"),
-            "num_gears":       _num_g,
-            "gear_ratios":     _gear_ratio_list,
-            "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — used for MPH sanity check: DS_RPM × rear_ratio × rollout / 12 / 5280 × 60 ≈ MPH"),
-            "suspension_type": _ms(car_cfg.get("suspension_type",""), "suspension type (hardtail/shocks) — affects 60ft interpretation"),
-            "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size"),
-            "weight_lbs":      car_cfg.get("car_weight_lbs","") or "NOT SET — needed for G-force and RWHP cross-check",
-            "notes":           car_cfg.get("car_notes",""),
-        }
+        if _car_specs:
+            # Build-sheet schema from the Car Profile page. Flag empty fields
+            # with the NOT SET sentinel — same convention the AI prompt expects.
+            def _bs_val(v):
+                if isinstance(v, dict):
+                    return {k: (sv if sv not in ("", None) else "NOT SET")
+                            for k, sv in v.items()}
+                return v if v not in ("", None) else "NOT SET"
+
+            car_profile = {k: _bs_val(v) for k, v in _car_specs.items()}
+            car_profile["_source"] = _specs_source
+        else:
+            # Legacy fallback: flat keys in user_configs
+            _gr = car_cfg.get("gear_ratios", {})
+            _num_g = int(car_cfg.get("num_gears", 2))
+            _gear_ratio_list = {
+                ["1st","2nd","3rd","4th","5th","6th"][i]: _gr.get(str(i+1)) or "NOT SET"
+                for i in range(_num_g)
+            }
+            # Flag missing specs so the AI can call them out
+            def _ms(val, label):
+                """Return value or a sentinel that tells the AI the field is missing."""
+                return val if val else f"NOT SET — {label} missing, analysis limited"
+
+            car_profile = {
+                "sanctioning_body": _ms(car_cfg.get("sanctioning_body", ""), "sanctioning body (NHRA/IHRA/NMCA/etc.) — needed to apply correct rulebook"),
+                "class_name":       _ms(car_cfg.get("class_name", ""), "class name — needed to determine index, dial-in rules, and performance limits"),
+                "engine":          _ms(car_cfg.get("engine_desc",""), "engine displacement/type"),
+                "fuel_type":       _ms(car_cfg.get("fuel_type",""), "fuel type — critical for EGT range, fuel flow, and power interpretation"),
+                "carburetor":      _ms(car_cfg.get("carb_desc",""), "carburetor/fuel system"),
+                "blower_type":     _ms(car_cfg.get("blower_type",""), "blower type (roots/screw)"),
+                "blower_style":    _ms(car_cfg.get("blower_style",""), "blower rotor style"),
+                "blower_size":     _ms(car_cfg.get("blower_size",""), "blower case size e.g. 14-71"),
+                "converter":       _ms(car_cfg.get("converter_desc",""), "converter stall speed and type"),
+                "transmission":    _ms(car_cfg.get("transmission",""), "transmission type"),
+                "num_gears":       _num_g,
+                "gear_ratios":     _gear_ratio_list,
+                "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — used for MPH sanity check: DS_RPM × rear_ratio × rollout / 12 / 5280 × 60 ≈ MPH"),
+                "suspension_type": _ms(car_cfg.get("suspension_type",""), "suspension type (hardtail/shocks) — affects 60ft interpretation"),
+                "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size"),
+                "weight_lbs":      car_cfg.get("car_weight_lbs","") or "NOT SET — needed for G-force and RWHP cross-check",
+                "notes":           car_cfg.get("car_notes",""),
+            }
 
         payload = {
             "car_profile": car_profile,
@@ -2038,6 +2151,9 @@ def show_run_analysis(
                     "wind":         slip.get("wind"),
                 },
                 "run_details":   rd,
+                # Delay box setting (bracket/index racing) — affects how
+                # reaction time should be interpreted.
+                "delay_box_sec": run_rec.get("delay_box"),
                 "channel_stats": ch_stats,
                 "key_traces":    key_traces,
                 "changelog":     run_rec.get("changelog", []),
@@ -2760,6 +2876,14 @@ def show_run_analysis(
     </div>
     """, unsafe_allow_html=True)
 
+        st.markdown("---")
+
+    elif slip and not weight_input:
+        st.info(
+            "Set **Weight with driver** in your Car Profile to see estimated "
+            "rear-wheel horsepower for this run.",
+            icon="⚡",
+        )
         st.markdown("---")
 
     elif _slip_storage_key and not car_number_input.strip():

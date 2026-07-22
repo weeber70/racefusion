@@ -5,7 +5,8 @@ import re
 import streamlit as st
 from datetime import datetime
 from database import _sb, _delete_run_files, get_effective_da
-from weather import _track_key
+from weather import canonical_track, build_track_display_map
+from config import load_config
 
 
 def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, logo_src: "str | None" = None):
@@ -105,13 +106,21 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
 
     st.divider()
 
-    # ── Group runs by (date, track) ────────────────────────────────────────────
+    # ── Group runs by (date, canonical track) ──────────────────────────────────
+    # canonical_track applies auto-normalization (case, punctuation,
+    # " at <place>" suffixes) plus the user's manual track merges, so
+    # "Lucas Oil Raceway Park" and "Lucas Oil Raceway Park At Indianapolis"
+    # collapse into one event. Raw timeslip text is never modified.
+    _rm_aliases = load_config().get("track_aliases", {}) or {}
+    # One consistent display name per canonical track — computed over ALL
+    # runs so every date bucket of the same track shows the identical label.
+    _rm_track_disp = build_track_display_map(
+        (r["track"] for r in _rm_run_list), _rm_aliases
+    )
     from collections import defaultdict as _rm_defaultdict
     _rm_groups: dict = _rm_defaultdict(list)
     for _rmr in _rm_run_list:
-        # Normalize track for grouping so "Great Lakes Dragaway" and
-        # "Great Lakes DRAGAWAY" merge into one event.
-        _rm_norm_track = _track_key(_rmr["track"]) if _rmr["track"] else ""
+        _rm_norm_track = canonical_track(_rmr["track"], _rm_aliases)[0] if _rmr["track"] else ""
         _rm_groups[(_rmr["date"], _rm_norm_track)].append(_rmr)
 
     _rm_group_keys = sorted(
@@ -128,8 +137,9 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
         _rm_stored_evt = _rm_evt_runs[0]["event_name"] or ""
         _rm_n_evt      = len(_rm_evt_runs)
         _rm_disp_event = _rm_stored_evt or "Unnamed event"
-        # Display the original track name from the first run (not the normalized key)
-        _rm_disp_track = _rm_evt_runs[0]["track"] or "Unknown Track"
+        # Canonical display name — same label for every bucket of this track
+        # (keyed by the group's canonical key, not this bucket's raw text)
+        _rm_disp_track = _rm_track_disp.get(_rm_gntrack) or "Unknown Track"
 
         # Apply search filter using display values
         if _rm_search:

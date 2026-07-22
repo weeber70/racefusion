@@ -10,9 +10,9 @@ import plotly.graph_objects as go
 
 from database import (
     load_run, load_run_csv_bytes, get_user_cars, load_channel_ranges, _get_secret,
+    get_effective_da,
 )
 from run_analysis import load_racepak_csv, get_time_col
-from weather import calc_density_altitude
 from config import load_config
 from charts import make_overlay_chart
 
@@ -374,9 +374,7 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             slip = rec.get("timeslip", {})
             wx   = rec.get("weather", {})
             rd   = rec.get("run_details", {})
-            da   = calc_density_altitude(
-                wx.get("temperature_f"), wx.get("pressure_hpa"), wx.get("humidity_pct")
-            )
+            da   = get_effective_da(rec)  # da_override wins, same as all pages
             hpa  = wx.get("pressure_hpa")
             baro = hpa * 0.02953 if hpa else None
 
@@ -404,6 +402,9 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             ]:
                 _v = rd.get(_k)
                 lines.append(f"  {_lab}: {_v if _v not in (None, '') else 'n/a'}")
+            # Delay box is stored at the run_data level, not in run_details
+            _db = rec.get("delay_box")
+            lines.append(f"  Delay Box (sec): {_db if _db else 'n/a'}")
             lines.append("Channel peaks (from data logger):")
             if df is not None:
                 for _lab, _ch, _use_min in _payload_peaks:
@@ -495,17 +496,10 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             colors = _best_worst_colors(nums, lower_better=lower_better)
             return (label, vals_str, colors)
 
-        # DA: always recompute from weather fields including humidity (matches run_analysis display)
+        # DA: shared helper — da_override wins, else recompute from raw weather
+        # (identical to Run Manager / Season Summary / Run Analysis).
         def _da_values():
-            vals_raw = []
-            for _, rec in records:
-                wx = rec.get("weather", {})
-                da = calc_density_altitude(
-                    wx.get("temperature_f"),
-                    wx.get("pressure_hpa"),
-                    wx.get("humidity_pct"),
-                )
-                vals_raw.append(da)
+            vals_raw = [get_effective_da(rec) for _, rec in records]
             vals_str = [_fmt(v, "{:,.0f} ft") for v in vals_raw]
             nums = []
             for v in vals_raw:
@@ -539,8 +533,22 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
 
     def _wx_rows(records):
         rows = []
-        def _row(label, getter, fmt, lower_better=True):
-            vals_raw = [getter(rec) for _, rec in records]
+        # Per-run DA override flags — each run evaluated independently.
+        # For overridden runs, the API Temp/Humidity/Baro rows are hidden
+        # (they are not the basis for that run's DA), matching Run Analysis.
+        _has_ovr = [bool(rec.get("da_override")) for _, rec in records]
+        _OVR_BADGE = (
+            ' <span style="background:rgba(255,165,0,0.18);color:#FFA500;'
+            'border:1px solid #FFA500;border-radius:4px;padding:0 5px;'
+            'font-size:0.62rem;font-weight:600;white-space:nowrap;">'
+            '📋 Racer-documented</span>'
+        )
+
+        def _row(label, getter, fmt, lower_better=True, api_row=False):
+            vals_raw = [
+                None if (api_row and _has_ovr[i]) else getter(rec)
+                for i, (_, rec) in enumerate(records)
+            ]
             vals_str = [_fmt(v, fmt) for v in vals_raw]
             nums = []
             for v in vals_raw:
@@ -564,18 +572,29 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             hpa = wx.get("pressure_hpa")
             return hpa * 0.02953 if hpa else None
 
-        def _da(rec):
-            wx = rec.get("weather", {})
-            return calc_density_altitude(
-                wx.get("temperature_f"),
-                wx.get("pressure_hpa"),
-                wx.get("humidity_pct"),
-            )
+        def _da_row():
+            vals_raw = [get_effective_da(rec) for _, rec in records]
+            nums = []
+            for v in vals_raw:
+                try:
+                    nums.append(float(v))
+                except (TypeError, ValueError):
+                    nums.append(None)
+            vals_str = []
+            for v, _ovr in zip(vals_raw, _has_ovr):
+                s = _fmt(v, "{:,.0f}")
+                if _ovr and s != "—":
+                    s += _OVR_BADGE
+                vals_str.append(s)
+            return ("Density Alt (ft)", vals_str,
+                    _best_worst_colors(nums, lower_better=True))
 
-        rows.append(_row("Temp (°F)",       _temp,  "{:.1f}", lower_better=True))
-        rows.append(_row("Humidity (%)",    _humid, "{:.0f}", lower_better=True))
-        rows.append(_row("Baro (inHg)",     _baro,  "{:.2f}", lower_better=False))
-        rows.append(_row("Density Alt (ft)", _da,   "{:,.0f}", lower_better=True))
+        # Skip the API rows entirely when every compared run is overridden
+        if not all(_has_ovr):
+            rows.append(_row("Temp (°F)",    _temp,  "{:.1f}", lower_better=True,  api_row=True))
+            rows.append(_row("Humidity (%)", _humid, "{:.0f}", lower_better=True,  api_row=True))
+            rows.append(_row("Baro (inHg)",  _baro,  "{:.2f}", lower_better=False, api_row=True))
+        rows.append(_da_row())
         return rows
 
     st.markdown(
@@ -602,10 +621,12 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             return (label, vals, _differ_colors(vals))
 
         for _lbl, _key, _fmt_s in [
-            ("Tire PSI FL",     "tire_pressure_fl",  "{:.1f}"),
-            ("Tire PSI FR",     "tire_pressure_fr",  "{:.1f}"),
-            ("Tire PSI RL",     "tire_pressure_rl",  "{:.1f}"),
-            ("Tire PSI RR",     "tire_pressure_rr",  "{:.1f}"),
+            ("Tire PSI FL",     "tire_pressure_fl",  "{:.2f}"),
+            ("Tire PSI FR",     "tire_pressure_fr",  "{:.2f}"),
+            ("Tire PSI RL",     "tire_pressure_rl",  "{:.2f}"),
+            ("Tire PSI RR",     "tire_pressure_rr",  "{:.2f}"),
+            ("Rear Tire",       "rear_tire_size",    "{}"),
+            ("Rollout (in)",    "rollout_inches",    "{}"),
             ("Launch RPM",      "launch_rpm",         "{:,.0f}"),
             ("Shift Point",     "shift_point",        "{:,.0f}"),
             ("Main Jet",        "main_jet",           "{:.3f}"),
@@ -616,6 +637,8 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             ("HS Open PSI",     "hs_open_psi",        "{:.0f}"),
             ("Valve Lash",      "valve_lash",         "{}"),
             ("Spark Plug",      "spark_plug",         "{}"),
+            ("Initial Timing (°)", "initial_timing_deg", "{}"),
+            ("Total Timing (°)",   "total_timing_deg",   "{}"),
             ("Track Temp (°F)", "track_temp_f",       "{:.0f}"),
             ("Tire Temp (°F)",  "tire_temp_f",        "{:.0f}"),
         ]:
@@ -631,6 +654,18 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
             if all(v == "—" for v in vals_str):
                 continue
             rows.append((_lbl, vals_str, _differ_colors(vals_str)))
+
+        # Delay Box — plain display, no best/worst coloring: a "better"
+        # setting depends on strategy, not raw performance.
+        _db_vals = []
+        for _, rec in records:
+            _dbv = rec.get("delay_box")
+            try:
+                _db_vals.append(f"{float(_dbv):.3f}" if _dbv else "—")
+            except (TypeError, ValueError):
+                _db_vals.append("—")
+        if any(v != "—" for v in _db_vals):
+            rows.append(("Delay Box (sec)", _db_vals, [None] * len(_db_vals)))
 
         # Notes — always show if any run has them
         notes = [str(rd.get("notes") or "—") for rd in rds]

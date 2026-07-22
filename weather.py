@@ -90,6 +90,69 @@ def _track_key(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _auto_track_key(name: str) -> str:
+    """_track_key plus auto-stripping of venue-preserving ' at <place>' suffixes.
+
+    'Lucas Oil Raceway Park At Indianapolis' and 'Lucas Oil Raceway Park'
+    both normalise to 'lucas oil raceway park'. The suffix is only stripped
+    when at least two words precede ' at ', so short legitimate names are
+    never mangled. Pure text normalisation — no geocoding.
+    """
+    k = _track_key(name)
+    parts = k.split(" at ", 1)
+    if len(parts) == 2 and len(parts[0].split()) >= 2:
+        return parts[0].strip()
+    return k
+
+
+def canonical_track(name: str, aliases: "dict | None" = None) -> "tuple[str, str]":
+    """Return (group_key, display_name) for a raw timeslip track name.
+
+    Applies auto-normalisation (_auto_track_key) and then the user's manual
+    merges from cfg['track_aliases'] ({auto_key: canonical display name}).
+    The raw text stored in each run's timeslip is never modified — merging
+    only changes how runs are grouped and labelled.
+    """
+    raw = (name or "").strip()
+    key = _auto_track_key(raw)
+    canon = (aliases or {}).get(key)
+    if canon:
+        return _auto_track_key(canon), canon.strip()
+    return key, (raw.title() if raw else "")
+
+
+def build_track_display_map(raw_names, aliases: "dict | None" = None) -> dict:
+    """Map canonical group_key → ONE consistent display name for a set of runs.
+
+    canonical_track() alone falls back to each run's raw text for display, so
+    two buckets of the same canonical track can show different labels (e.g.
+    'Lucas Oil Raceway Park' vs 'Lucas Oil Raceway Park At Indianapolis').
+    This picks a single deterministic representative per key:
+      1. a manual-merge alias target, if one points at this key
+      2. otherwise the SHORTEST raw variant seen (title-cased) — the base name
+         wins over suffixed variants, and single-variant tracks keep their
+         exact raw text.
+    """
+    aliases = aliases or {}
+    # Alias display names, keyed by the canonical key they resolve to
+    _alias_disp = {_auto_track_key(v): v.strip() for v in aliases.values() if v}
+
+    _best_raw: dict = {}
+    for raw in raw_names:
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        key = canonical_track(raw, aliases)[0]
+        cur = _best_raw.get(key)
+        if cur is None or len(raw) < len(cur):
+            _best_raw[key] = raw
+
+    return {
+        key: (_alias_disp.get(key) or raw.title())
+        for key, raw in _best_raw.items()
+    }
+
+
 def lookup_track(track_name: str, city_state: str = "") -> dict | None:
     """
     Return {"lat", "lon", "elev_ft", "display_name"} for a drag strip.

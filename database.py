@@ -217,8 +217,15 @@ def _register_user(username: str, password: str, email: str = "") -> bool:
 
 # ── Run record persistence ────────────────────────────────────────────────────
 def load_run(csv_name: str) -> dict:
+    """Load a run's data — ALWAYS scoped to the logged-in user.
+
+    The username filter is the ownership check: a run ID belonging to another
+    account simply returns {} (empty state). Never log or surface the
+    requested ID on the miss path.
+    """
     if not _sb: return {}
     username = st.session_state.get("rf_user", "")
+    if not username: return {}
     try:
         rows = _sb.table("runs").select("run_data").eq("username", username).eq("csv_filename", csv_name).execute().data
         return rows[0]["run_data"] if rows else {}
@@ -357,9 +364,44 @@ def save_car_build_sheet(car_id: str, build_sheet: dict) -> bool:
         return False
 
 
+def compute_run_date(record: dict) -> "str | None":
+    """Parse timeslip date + time into an ISO timestamp for the run_date column.
+
+    Mirrors the old client-side sort key (timeslip.date, timeslip.time).
+    Returns None when the run has no parseable timeslip date.
+    """
+    from datetime import datetime
+    slip = (record or {}).get("timeslip") or {}
+    d = str(slip.get("date") or "").strip()
+    t = str(slip.get("time") or "").strip()
+    if not d:
+        return None
+    date_obj = None
+    for _dfmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y"):
+        try:
+            date_obj = datetime.strptime(d, _dfmt)
+            break
+        except ValueError:
+            continue
+    if date_obj is None:
+        return None
+    if t:
+        for _tfmt in ("%I:%M %p", "%I:%M:%S %p", "%H:%M", "%H:%M:%S"):
+            try:
+                _t_obj = datetime.strptime(t.upper(), _tfmt)
+                date_obj = date_obj.replace(
+                    hour=_t_obj.hour, minute=_t_obj.minute, second=_t_obj.second
+                )
+                break
+            except ValueError:
+                continue
+    return date_obj.isoformat()
+
+
 def save_run(csv_name: str, record: dict, car_id: str | None = None):
     if not _sb: return
     username = st.session_state.get("rf_user", "")
+    if not username: return
     _extra = {"car_id": car_id} if car_id else {}
     # Normalize track name to Title Case so variations like "GREAT LAKES DRAGAWAY"
     # and "Great Lakes Dragaway" merge into the same track in Season Summary.
@@ -368,12 +410,24 @@ def save_run(csv_name: str, record: dict, car_id: str | None = None):
         for _tk in ("track_name", "track_location"):
             if _slip.get(_tk):
                 _slip[_tk] = _slip[_tk].strip().title()
+    # Chronological timestamp column — kept in sync with timeslip date/time
+    _run_date = compute_run_date(record)
     try:
-        existing = _sb.table("runs").select("id").eq("username", username).eq("csv_filename", csv_name).execute().data
+        existing = _sb.table("runs").select("id,car_id").eq("username", username).eq("csv_filename", csv_name).execute().data
+        # Snapshot the car's build sheet into run_data at save time — a
+        # permanent point-in-time record of the car config when the run was
+        # made. First write wins: never overwrite an existing snapshot, so
+        # later Car Profile edits don't rewrite history.
+        if not record.get("car_snapshot"):
+            _snap_car_id = car_id or ((existing[0].get("car_id") or "") if existing else "")
+            if _snap_car_id:
+                _snap_bs = load_car_build_sheet(_snap_car_id)
+                if _snap_bs:
+                    record["car_snapshot"] = _snap_bs
         if existing:
-            _sb.table("runs").update({"run_data": record, "updated_at": "now()", **_extra}).eq("username", username).eq("csv_filename", csv_name).execute()
+            _sb.table("runs").update({"run_data": record, "run_date": _run_date, "updated_at": "now()", **_extra}).eq("username", username).eq("csv_filename", csv_name).execute()
         else:
-            _sb.table("runs").insert({"username": username, "csv_filename": csv_name, "run_data": record, **_extra}).execute()
+            _sb.table("runs").insert({"username": username, "csv_filename": csv_name, "run_data": record, "run_date": _run_date, **_extra}).execute()
     except Exception as e:
         st.warning(f"Run save failed: {e}")
 
@@ -382,6 +436,7 @@ def save_run_csv(csv_name: str, data: bytes):
     """Persist RacePak CSV bytes to Supabase (stored as text in runs table)."""
     if not _sb: return
     username = st.session_state.get("rf_user", "")
+    if not username: return
     csv_text = data.decode("utf-8", errors="replace")
     try:
         existing = _sb.table("runs").select("id").eq("username", username).eq("csv_filename", csv_name).execute().data
@@ -394,9 +449,10 @@ def save_run_csv(csv_name: str, data: bytes):
 
 
 def load_run_csv_bytes(csv_name: str) -> bytes | None:
-    """Load the raw CSV bytes for a saved run from Supabase."""
+    """Load the raw CSV bytes for a saved run — scoped to the logged-in user."""
     if not _sb: return None
     username = st.session_state.get("rf_user", "")
+    if not username: return None
     try:
         rows = _sb.table("runs").select("csv_content").eq("username", username).eq("csv_filename", csv_name).execute().data
         if rows and rows[0]["csv_content"]:
@@ -443,6 +499,7 @@ def list_saved_runs() -> list[dict]:
     """Return saved runs newest-first, each with label + filename + has_csv + record."""
     if not _sb: return []
     username = st.session_state.get("rf_user", "")
+    if not username: return []
     try:
         rows = _sb.table("runs").select("csv_filename,run_data,created_at").eq("username", username).order("created_at", desc=True).execute().data
         try:

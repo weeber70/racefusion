@@ -331,7 +331,17 @@ if st.session_state["rf_user"] is None:
     _auth_tab_login, _auth_tab_reg = st.tabs(["Log In", "Create Account"])
 
     def _do_login(username: str):
-        """Set session state and write session token after successful auth."""
+        """Set session state and write session token after successful auth.
+
+        SECURITY: wipe ALL session state first so nothing from a previously
+        logged-in account (selected run, cached AI analyses, compare
+        selections, channel prefs, form state) leaks into this user's session.
+        """
+        for _k in list(st.session_state.keys()):
+            st.session_state.pop(_k, None)
+        # Drop any stale run/page pointers carried in the URL
+        st.query_params.pop("run", None)
+        st.query_params.pop("p", None)
         st.session_state["rf_user"] = username
         _tok = _create_session_token(username)
         if _tok:
@@ -756,10 +766,13 @@ if _ub_col2.button("Log Out", key="logout_btn"):
     _delete_session_token(st.session_state.pop("session_token", None) or "")
     st.query_params.pop("session", None)
     st.query_params.pop("p", None)
+    st.query_params.pop("run", None)
+    # SECURITY: wipe ALL session state (selected run, cached AI analyses,
+    # compare selections, subscription flags, form state) so nothing leaks
+    # into the next account that logs in on this browser session.
+    for _lo_k in list(st.session_state.keys()):
+        st.session_state.pop(_lo_k, None)
     st.session_state["rf_user"] = None
-    # Clear subscription state so next login gets a fresh check
-    for _sub_k in ("sub_tier", "trial_active", "access_granted", "charts_granted"):
-        st.session_state.pop(_sub_k, None)
     st.rerun()
 
 _cur_page = st.session_state.get("current_page", "dashboard")
@@ -807,7 +820,9 @@ st.sidebar.markdown("---")
 
 # ── Car number & weight (used downstream for timeslip scanning and RWHP) ──────
 car_number_input = cfg.get("car_number", "")
-weight_input = int(cfg.get("car_weight_lbs", 2500))
+# Legacy key only — run_analysis re-resolves weight per-run from the car
+# snapshot / build sheet. 0 = not set (never assume a placeholder weight).
+weight_input = int(cfg.get("car_weight_lbs", 0) or 0)
 
 # ── Run selector ───────────────────────────────────────────────────────────────
 _saved_runs = list_saved_runs()
