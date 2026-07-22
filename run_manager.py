@@ -123,52 +123,88 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
         _rm_norm_track = canonical_track(_rmr["track"], _rm_aliases)[0] if _rmr["track"] else ""
         _rm_groups[(_rmr["date"], _rm_norm_track)].append(_rmr)
 
-    _rm_group_keys = sorted(
-        _rm_groups.keys(),
-        key=lambda _k: (_k[0] or "0000-00-00"),
-        reverse=True,
-    )
+    # ── Two-level hierarchy: track → date ──────────────────────────────────────
+    # Top level is bounded by DISTINCT TRACKS (not race days). Each track
+    # expander contains one toggle row per date visited; Streamlit forbids
+    # nested expanders, so the date level is a toggle that expands in place.
+    _rm_by_track: dict = _rm_defaultdict(list)   # track_key → [(date, runs)]
+    for (_gd, _gt), _gruns in _rm_groups.items():
+        _rm_by_track[_gt].append((_gd, _gruns))
 
-    if not _rm_group_keys:
+    if not _rm_by_track:
         st.info("No runs saved yet. Use **Create New Run** to upload your first run.")
 
-    for (_rm_gdate, _rm_gntrack) in _rm_group_keys:
-        _rm_evt_runs   = _rm_groups[(_rm_gdate, _rm_gntrack)]
-        _rm_stored_evt = _rm_evt_runs[0]["event_name"] or ""
-        _rm_n_evt      = len(_rm_evt_runs)
-        _rm_disp_event = _rm_stored_evt or "Unnamed event"
-        # Canonical display name — same label for every bucket of this track
-        # (keyed by the group's canonical key, not this bucket's raw text)
+    # Track order: most runs first (mirrors Season Summary's Runs by Track)
+    _rm_track_order = sorted(
+        _rm_by_track.keys(),
+        key=lambda _tk: -sum(len(_r) for _, _r in _rm_by_track[_tk]),
+    )
+
+    for _rm_gntrack in _rm_track_order:
+        _rm_track_days = sorted(
+            _rm_by_track[_rm_gntrack],
+            key=lambda _d: (_d[0] or "0000-00-00"),
+            reverse=True,
+        )
+        # Canonical display name — identical for every bucket of this track
         _rm_disp_track = _rm_track_disp.get(_rm_gntrack) or "Unknown Track"
 
-        # Apply search filter using display values
+        # Search filter at the date-group level; track stays visible if ANY
+        # of its days match (by track name, date, or event name).
         if _rm_search:
-            _rm_match_text = f"{_rm_gdate} {_rm_disp_track} {_rm_stored_evt}".lower()
-            if _rm_search not in _rm_match_text:
-                continue
+            _rm_days_visible = [
+                (_gd, _gruns) for _gd, _gruns in _rm_track_days
+                if _rm_search in
+                f"{_gd} {_rm_disp_track} {_gruns[0]['event_name'] or ''}".lower()
+            ]
+        else:
+            _rm_days_visible = _rm_track_days
+        if not _rm_days_visible:
+            continue
 
-        # Reformat date as M-DD-YYYY for display (sort order uses ISO _rm_gdate)
-        try:
-            _rm_disp_date = __import__("datetime").date.fromisoformat(_rm_gdate).strftime("%-m-%d-%Y")
-        except Exception:
-            _rm_disp_date = _rm_gdate or "—"
-        _rm_expander_lbl = (
-            f"{_rm_disp_date} · {_rm_disp_track} · "
-            f"{_rm_n_evt} run{'s' if _rm_n_evt != 1 else ''} · {_rm_disp_event}"
+        # Track summary: total runs + best ET across all days
+        _rm_trk_total = sum(len(_r) for _, _r in _rm_track_days)
+        _rm_trk_ets = []
+        for _, _gruns in _rm_track_days:
+            for _gr in _gruns:
+                try:
+                    _et_v = float(_gr["slip"].get("ft_1320") or 0)
+                    if _et_v > 0:
+                        _rm_trk_ets.append(_et_v)
+                except (TypeError, ValueError):
+                    pass
+        _rm_trk_best = f"{min(_rm_trk_ets):.3f}s" if _rm_trk_ets else "—"
+
+        _rm_trk_lbl = (
+            f"📍 {_rm_disp_track} · {_rm_trk_total} run"
+            f"{'s' if _rm_trk_total != 1 else ''} · Best ET: {_rm_trk_best}"
         )
 
-        with st.expander(_rm_expander_lbl, expanded=False):
+        with st.expander(_rm_trk_lbl, expanded=False):
+          for (_rm_gdate, _rm_evt_runs) in _rm_days_visible:
+            _rm_stored_evt = _rm_evt_runs[0]["event_name"] or ""
+            _rm_n_evt      = len(_rm_evt_runs)
 
-            # Stable key fragment: use normalized track (already deduplicated/safe)
+            # Reformat date as M-DD-YYYY for display (sorting uses ISO date)
+            try:
+                _rm_disp_date = __import__("datetime").date.fromisoformat(_rm_gdate).strftime("%-m-%d-%Y")
+            except Exception:
+                _rm_disp_date = _rm_gdate or "—"
+
+            # Stable key fragment: date + canonical track (deduplicated/safe)
             _rm_gkey = re.sub(r"[^\w]", "_", f"{_rm_gdate}_{_rm_gntrack}")
+
+            _rm_day_lbl = (
+                f"📅 {_rm_disp_date} · {_rm_n_evt} run"
+                f"{'s' if _rm_n_evt != 1 else ''}"
+                + (f" · {_rm_stored_evt}" if _rm_stored_evt else "")
+            )
+            # Date sub-row: toggle expands the day's runs in place
+            if not st.toggle(_rm_day_lbl, key=f"rm_day_{_rm_gkey}"):
+                continue
             _rm_evt_ids     = [r["filename"] for r in _rm_evt_runs]
             _rm_evt_sel_key  = f"rm_sel_evt_{_rm_gkey}"
-            _rm_evt_name_key = f"rm_evt_name_{_rm_gkey}"
             _rm_evt_del_key  = f"rm_del_evt_{_rm_gkey}"
-
-            # Pre-populate event name on first visit (don't overwrite if user typed)
-            if _rm_evt_name_key not in st.session_state:
-                st.session_state[_rm_evt_name_key] = _rm_stored_evt
 
             # Callbacks capture current loop values via default-arg idiom
             def _rm_on_evt_sel(_eids=_rm_evt_ids, _esk=_rm_evt_sel_key):
@@ -180,17 +216,6 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
                     else:
                         st.session_state["rm_selected"].discard(_fid)
 
-            def _rm_on_evt_name(_eids=_rm_evt_ids, _enk=_rm_evt_name_key):
-                _new_name = st.session_state.get(_enk, "")
-                if _sb:
-                    for _fid in _eids:
-                        try:
-                            _sb.table("runs").update({"event_name": _new_name}).eq(
-                                "csv_filename", _fid
-                            ).eq("username", current_user).execute()
-                        except Exception:
-                            pass
-
             # Checked runs in this event — determines whether 🗑 is active
             _rm_evt_checked_ids = [
                 fid for fid in _rm_evt_ids
@@ -198,22 +223,18 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
             ]
             _rm_evt_n_checked = len(_rm_evt_checked_ids)
 
-            # ── Event controls: [☐ select] [✏ name…] [🗑] ─────────────────────
-            _rm_evc1, _rm_evc2, _rm_evc3 = st.columns([1, 5, 1])
+            # ── Event controls: [☐ select] [🗑] — both packed into the narrow
+            # zone under the date/run-count text (first ~15% of the row):
+            # checkbox at ~0–8%, trash immediately right at ~8–17%.
+            _rm_evc1, _rm_evc2, _rm_evc3 = st.columns([1, 1, 10])
             _rm_evc1.checkbox(
                 "Select event", key=_rm_evt_sel_key,
                 label_visibility="collapsed",
                 on_change=_rm_on_evt_sel,
             )
-            _rm_evc2.text_input(
-                "Event name", key=_rm_evt_name_key,
-                placeholder="Name this event…",
-                label_visibility="collapsed",
-                on_change=_rm_on_evt_name,
-            )
             # 🗑 is disabled until ≥1 run in this event is checked;
             # when active it deletes only the checked runs (not the whole event).
-            if _rm_evc3.button(
+            if _rm_evc2.button(
                 "🗑",
                 key=_rm_evt_del_key,
                 help=(

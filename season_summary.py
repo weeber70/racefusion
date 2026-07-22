@@ -214,18 +214,26 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     _ssm_sorted = sorted(_ssm_runs, key=_ssm_sort_key)
 
     # Find best ET / reaction / 60ft indices for per-cell highlights
-    def _ssm_best_low_idx(key):
-        """Return the row index of the lowest non-null value for a slip field, or -1."""
+    def _ssm_best_low_idx(key, min_value=None):
+        """Return the row index of the lowest non-null value for a slip field, or -1.
+
+        min_value: when set, values below it are ineligible — used to keep
+        negative reaction times (red lights / fouls) out of "Best Reaction".
+        """
         vals = []
         for _ri, _rr in enumerate(_ssm_sorted):
             try:
-                vals.append((_ri, float(_rr["slip"].get(key))))
+                _v = float(_rr["slip"].get(key))
             except (TypeError, ValueError):
-                pass
+                continue
+            if min_value is not None and _v < min_value:
+                continue
+            vals.append((_ri, _v))
         return min(vals, key=lambda x: x[1])[0] if vals else -1
 
     _ssm_best_et_idx  = _ssm_best_low_idx("ft_1320")
-    _ssm_best_rt_idx  = _ssm_best_low_idx("reaction_time")
+    # RT ≥ 0.000 only — a negative RT is a foul, never the "best" reaction
+    _ssm_best_rt_idx  = _ssm_best_low_idx("reaction_time", min_value=0.0)
     _ssm_best_60_idx  = _ssm_best_low_idx("ft_60")
 
     def _ssm_cell(val, fmt=None, zero_blank=False):

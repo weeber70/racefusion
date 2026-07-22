@@ -3,11 +3,12 @@ race_day_predictor.py — RaceFusion Race Day Predictor page.
 """
 import requests
 import streamlit as st
-from database import _sb, load_run, _rdp_load_run_history
+from database import _sb, _rdp_load_run_history
+from config import save_config
 from weather import (
     calc_density_altitude, sea_level_to_station_pressure,
     station_to_sea_level_pressure, wind_dir_label,
-    _TRACK_OVERRIDES, _track_key, lookup_track, fetch_weather_rdp, fetch_metar,
+    _TRACK_OVERRIDES, _track_key, lookup_track, geocode, fetch_weather_rdp, fetch_metar,
 )
 
 
@@ -80,91 +81,70 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
 
     # ── Current Conditions ────────────────────────────────────────────────────
     st.markdown("## 🌤️ Current Conditions")
-    _rdp_cfg        = cfg   # cfg already loaded above
-    _rdp_lat        = _rdp_cfg.get("lat")
-    _rdp_lon        = _rdp_cfg.get("lon")
-    _rdp_elev_ft    = float(_rdp_cfg.get("elev_ft") or 0)
-    _rdp_loc_label      = _rdp_cfg.get("location_label", "") or _rdp_cfg.get("location_name", "")
-    _rdp_fallback_label = ""   # set here so it's always defined
+    _rdp_cfg = cfg   # cfg already loaded above
 
-    # If a run is currently active, derive track location from that run directly
-    # at render time — no cfg caching or session state syncing needed.
-    # If the run has a track name but lookup fails, show a warning and stop rather
-    # than silently falling through to a completely different track's coordinates.
-    _rdp_active_id          = st.session_state.get("active_run_id")
-    _rdp_active_has_track   = False  # run has a track name we can try to resolve
-    _rdp_active_lookup_ok   = False  # lookup_track() succeeded for that track
-    if _rdp_active_id:
-        _rdp_active_run   = load_run(_rdp_active_id)
-        _rdp_active_slip  = (_rdp_active_run or {}).get("timeslip", {})
-        _rdp_active_tname = (_rdp_active_slip.get("track_name") or "").strip()
-        _rdp_active_tloc  = (_rdp_active_slip.get("track_location") or "").strip()
-        if _rdp_active_tname or _rdp_active_tloc:
-            _rdp_active_has_track = True
-            _rdp_active_tk = lookup_track(_rdp_active_tname, _rdp_active_tloc)
-            if _rdp_active_tk:
-                _rdp_active_lookup_ok = True
-                _rdp_lat       = _rdp_active_tk["lat"]
-                _rdp_lon       = _rdp_active_tk["lon"]
-                _rdp_elev_ft   = float(_rdp_active_tk.get("elev_ft") or 0)
-                _rdp_loc_label = _rdp_active_tk["display_name"]
+    # ── Page-local track field: "what track am I at today?" ──────────────────
+    # Stored under predictor-scoped cfg keys (rdp_*). Nothing else in the app
+    # reads or writes these — completely independent of the run-upload /
+    # weather-lookup pipeline. No fallback to runs or any global setting.
+    _rdp_in_c1, _rdp_in_c2 = st.columns([3, 1], vertical_alignment="bottom")
+    _rdp_track_input = _rdp_in_c1.text_input(
+        "📍 Track you're at today",
+        value=_rdp_cfg.get("rdp_location_name", ""),
+        placeholder="e.g. Gainesville Raceway — or Gainesville, FL",
+        key="rdp_track_input",
+        help="Live weather for the ET prediction is pulled for this location. "
+             "This field is local to the Predictor and doesn't affect any run's data.",
+    )
+    if _rdp_in_c2.button("Set track", key="rdp_set_track_btn", use_container_width=True):
+        _rdp_in = _rdp_track_input.strip()
+        if not _rdp_in:
+            st.error("Enter a track or city first.")
+        else:
+            with st.spinner(f"📍 Locating {_rdp_in}…"):
+                _rdp_set_lat, _rdp_set_lon, _rdp_set_label = None, None, ""
+                _rdp_set_elev = None
+                _rdp_set_tk = lookup_track(_rdp_in)
+                if _rdp_set_tk:
+                    _rdp_set_lat   = _rdp_set_tk["lat"]
+                    _rdp_set_lon   = _rdp_set_tk["lon"]
+                    _rdp_set_label = _rdp_set_tk["display_name"]
+                    _rdp_set_elev  = _rdp_set_tk.get("elev_ft")
+                else:
+                    _rdp_set_lat, _rdp_set_lon, _rdp_set_label = geocode(_rdp_in)
+            if _rdp_set_lat is None:
+                st.error(f"Couldn't locate \"{_rdp_in}\" — try a nearby city and state.")
+            else:
+                cfg["rdp_location_name"]  = _rdp_in
+                cfg["rdp_location_label"] = _rdp_set_label or _rdp_in
+                cfg["rdp_lat"]     = _rdp_set_lat
+                cfg["rdp_lon"]     = _rdp_set_lon
+                cfg["rdp_elev_ft"] = _rdp_set_elev
+                save_config(cfg)
+                st.session_state["rdp_weather"] = None  # re-fetch at new coords
+                st.rerun()
 
-    # Track name known but unresolvable → warn and stop; never fall through to
-    # a different track's coordinates from cfg.
-    if _rdp_active_has_track and not _rdp_active_lookup_ok:
-        _rdp_unresolved = (_rdp_active_tname if _rdp_active_id else None) or (_rdp_active_tloc if _rdp_active_id else None) or "this track"
-        st.warning(
-            f"⚠️ Track '{_rdp_unresolved}' could not be found automatically. "
-            "Update the Track Location in the sidebar to get accurate weather for this track."
-        )
-        st.stop()
+    _rdp_lat        = _rdp_cfg.get("rdp_lat")
+    _rdp_lon        = _rdp_cfg.get("rdp_lon")
+    _rdp_elev_ft    = float(_rdp_cfg.get("rdp_elev_ft") or 0)
+    _rdp_loc_label  = _rdp_cfg.get("rdp_location_label", "") or _rdp_cfg.get("rdp_location_name", "")
+    _rdp_fallback_label = ""   # retained for downstream display logic
 
-    # cfg override and recent-runs fallback only run when the active-run block
-    # did NOT resolve coordinates — prevents saved cfg from clobbering the
-    # active run's track after the active-run block sets all four variables.
-    _rdp_ov = None  # initialised here so line 3399 can reference it unconditionally
-    if not _rdp_active_lookup_ok:
-        # Override: if stored location name matches a hardcoded override, use those
-        # exact coordinates — bypasses any wrong lat/lon previously saved to cfg.
-        _rdp_loc_name_raw = _rdp_cfg.get("location_name", "") or _rdp_cfg.get("location_label", "")
-        _rdp_ov = _TRACK_OVERRIDES.get(_track_key(_rdp_loc_name_raw))
-        if _rdp_ov:
-            print(f"[RDP] Override applied for '{_rdp_loc_name_raw}' → "
-                  f"lat={_rdp_ov['lat']}, lon={_rdp_ov['lon']}, elev_ft={_rdp_ov.get('elev_ft')}")
-            _rdp_lat     = _rdp_ov["lat"]
-            _rdp_lon     = _rdp_ov["lon"]
-            _rdp_elev_ft = float(_rdp_ov.get("elev_ft") or 0)
-
-        if not _rdp_lat or not _rdp_lon:
-            # Fall back to most recent run's track via lookup_track()
-            if _sb:
-                try:
-                    _rdp_recent = (_sb.table("runs")
-                                   .select("run_data")
-                                   .eq("username", current_user)
-                                   .order("created_at", desc=True)
-                                   .limit(20)
-                                   .execute().data or [])
-                    for _rdp_rr in _rdp_recent:
-                        _rdp_rr_slip = (_rdp_rr.get("run_data") or {}).get("timeslip") or {}
-                        _rdp_rr_tname = _rdp_rr_slip.get("track_name", "")
-                        _rdp_rr_tloc  = _rdp_rr_slip.get("track_location", "")
-                        if _rdp_rr_tname or _rdp_rr_tloc:
-                            _rdp_tk = lookup_track(_rdp_rr_tname, _rdp_rr_tloc)
-                            if _rdp_tk:
-                                _rdp_lat         = _rdp_tk["lat"]
-                                _rdp_lon         = _rdp_tk["lon"]
-                                _rdp_elev_ft     = float(_rdp_tk.get("elev_ft") or 0)
-                                _rdp_fallback_label = _rdp_tk["display_name"]
-                                break
-                except Exception:
-                    pass
+    # Hardcoded drag-strip override: exact coordinates for known tracks beat
+    # whatever geocoding stored.
+    _rdp_ov = _TRACK_OVERRIDES.get(
+        _track_key(_rdp_cfg.get("rdp_location_name") or _rdp_loc_label)
+    )
+    if _rdp_ov:
+        _rdp_lat     = _rdp_ov["lat"]
+        _rdp_lon     = _rdp_ov["lon"]
+        _rdp_elev_ft = float(_rdp_ov.get("elev_ft") or 0)
 
     if not _rdp_lat or not _rdp_lon:
-        st.warning("No track location set. Go to Track Location in the sidebar and save your location.")
+        st.info("📍 Set the track you're at today (above) to fetch live weather.")
     else:
         # Fetch and cache track elevation if not yet stored — needed for altimeter conversion
-        if _rdp_elev_ft == 0 and cfg.get("elev_ft") is None:
+        if not _rdp_elev_ft:
             try:
                 _ev_r = requests.get(
                     "https://api.open-meteo.com/v1/elevation",
@@ -174,7 +154,7 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                 _ev_m = (_ev_r.json().get("elevation") or [None])[0]
                 if _ev_m is not None:
                     _rdp_elev_ft = float(_ev_m) / 0.3048
-                    cfg["elev_ft"] = _rdp_elev_ft
+                    cfg["rdp_elev_ft"] = _rdp_elev_ft
                     save_config(cfg)
             except Exception:
                 pass
@@ -512,85 +492,104 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
 
                 _rdp_col_w = [1, 2, 3, 2, 2, 2, 2, 3]
 
-                # Header row
-                _rdp_hdr = st.columns(_rdp_col_w)
-                for _hcol, _hlbl in zip(
-                    _rdp_hdr,
-                    ["Include", "Date", "Track", "Run Type", "ET", "MPH", "DA ft", "Status"],
-                ):
-                    _hcol.markdown(
-                        f"<span style='font-size:0.75em;color:#888;"
-                        f"text-transform:uppercase;letter-spacing:0.05em'>{_hlbl}</span>",
+                def _rdp_render_header():
+                    _rdp_hdr = st.columns(_rdp_col_w)
+                    for _hcol, _hlbl in zip(
+                        _rdp_hdr,
+                        ["Include", "Date", "Track", "Run Type", "ET", "MPH", "DA ft", "Status"],
+                    ):
+                        _hcol.markdown(
+                            f"<span style='font-size:0.75em;color:#888;"
+                            f"text-transform:uppercase;letter-spacing:0.05em'>{_hlbl}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown(
+                        "<hr style='margin:2px 0 6px 0;border-color:#333'>",
                         unsafe_allow_html=True,
                     )
-                st.markdown(
-                    "<hr style='margin:2px 0 6px 0;border-color:#333'>",
-                    unsafe_allow_html=True,
+
+                # ── Group rows by year, newest year first ─────────────────────
+                _rdp_by_year: dict = {}
+                for _rdp_row in _rdp_display:
+                    _yr = str(_rdp_row.get("date") or "")[:4]
+                    _yr = _yr if _yr.isdigit() else "Undated"
+                    _rdp_by_year.setdefault(_yr, []).append(_rdp_row)
+                _rdp_year_order = sorted(
+                    _rdp_by_year.keys(),
+                    key=lambda _y: (_y == "Undated", -int(_y) if _y.isdigit() else 0),
                 )
 
                 _rdp_changes = {}   # {run_id: new_include_bool} for runs that drifted from DB
-                for _rdp_row in _rdp_display:
-                    _run_id  = _rdp_row.get("run_id", "")
-                    _chk_key = f"run_include_{_run_id}"
-                    _status  = _rdp_row["status"]
-
-                    if _status == "included":
-                        _status_html = "<span style='color:#4CAF50'>included</span>"
-                    elif _status == "force-included (override)":
-                        _status_html = "<span style='color:#2ecc71'>force-included (override)</span>"
-                    elif _status == "excluded — non-qualifying run type":
-                        _status_html = "<span style='color:#cc8800'>excluded — non-qualifying run type</span>"
-                    elif _status == "excluded — outlier (IQR)":
-                        _status_html = "<span style='color:#FFA500'>excluded — outlier (IQR)</span>"
-                    else:
-                        _status_html = "<span style='color:#888'>excluded — manual</span>"
-
-                    # Date + time combined (same logic as Season Summary)
-                    _rdp_date_str = _rdp_row.get("date") or ""
-                    _rdp_time_str = _rdp_row.get("time") or ""
-                    if _rdp_time_str:
-                        try:
-                            from datetime import datetime as _rdp_dtparse
-                            _rdp_t = _rdp_dtparse.strptime(_rdp_time_str.strip(), "%H:%M")
-                            _rdp_time_disp = _rdp_t.strftime("%-I:%M %p")
-                        except Exception:
-                            _rdp_time_disp = _rdp_time_str
-                        _rdp_date_disp = f"{_rdp_date_str} {_rdp_time_disp}" if _rdp_date_str else _rdp_time_disp
-                    else:
-                        _rdp_date_disp = _rdp_date_str or "—"
-
-                    _rdp_cols = st.columns(_rdp_col_w)
-                    # No value= — session state (set during initialization above) is the source of truth
-                    _new_inc = _rdp_cols[0].checkbox(
-                        "",
-                        key=_chk_key,
-                        label_visibility="collapsed",
+                for _rdp_yr in _rdp_year_order:
+                    _rdp_yr_rows = _rdp_by_year[_rdp_yr]
+                    _rdp_yr_lbl = (
+                        f"📅 {_rdp_yr} · {len(_rdp_yr_rows)} run"
+                        f"{'s' if len(_rdp_yr_rows) != 1 else ''}"
                     )
-                    _rdp_cols[1].write(_rdp_date_disp)
-                    _rdp_cols[2].write(_rdp_row.get("track") or "—")
-                    _rdp_cols[3].write(_rdp_row.get("run_type") or "—")
-                    _rdp_cols[4].write(f"{_rdp_row['et']:.3f}")
-                    _rdp_mph = _rdp_row.get("mph")
-                    _rdp_cols[5].write(f"{float(_rdp_mph):.2f}" if _rdp_mph else "—")
-                    _rdp_cols[6].write(f"{int(round(_rdp_row['da'])):,}")
-                    _rdp_cols[7].markdown(_status_html, unsafe_allow_html=True)
-                    st.markdown(
-                        "<hr style='margin:2px 0;border-color:#222'>",
-                        unsafe_allow_html=True,
-                    )
+                    with st.expander(_rdp_yr_lbl, expanded=(_rdp_yr == _rdp_year_order[0])):
+                        _rdp_render_header()
+                        for _rdp_row in _rdp_yr_rows:
+                            _run_id  = _rdp_row.get("run_id", "")
+                            _chk_key = f"run_include_{_run_id}"
+                            _status  = _rdp_row["status"]
 
-                    # Detect drift from DB for persistence (compare to predictor_exclude in DB)
-                    _db_excl = _rdp_row.get("predictor_exclude")
-                    _row_rtype    = _rdp_row.get("run_type", "")
-                    _row_rtype_ok = (not _row_rtype) or (_row_rtype in ("Full Pass", "Bye"))
-                    _row_iqr_ok   = not (_rdp_row["et"] < _rdp_lo or _rdp_row["et"] > _rdp_hi)
-                    _auto_default = _row_rtype_ok and _row_iqr_ok
-                    if _db_excl is True and _new_inc:
-                        _rdp_changes[_run_id] = True   # user re-included a DB-excluded run
-                    elif _db_excl is False and not _new_inc:
-                        _rdp_changes[_run_id] = False  # user re-excluded a DB-included run
-                    elif _db_excl is None and _new_inc != _auto_default:
-                        _rdp_changes[_run_id] = _new_inc  # user overrode the auto-default
+                            if _status == "included":
+                                _status_html = "<span style='color:#4CAF50'>included</span>"
+                            elif _status == "force-included (override)":
+                                _status_html = "<span style='color:#2ecc71'>force-included (override)</span>"
+                            elif _status == "excluded — non-qualifying run type":
+                                _status_html = "<span style='color:#cc8800'>excluded — non-qualifying run type</span>"
+                            elif _status == "excluded — outlier (IQR)":
+                                _status_html = "<span style='color:#FFA500'>excluded — outlier (IQR)</span>"
+                            else:
+                                _status_html = "<span style='color:#888'>excluded — manual</span>"
+
+                            # Date + time combined (same logic as Season Summary)
+                            _rdp_date_str = _rdp_row.get("date") or ""
+                            _rdp_time_str = _rdp_row.get("time") or ""
+                            if _rdp_time_str:
+                                try:
+                                    from datetime import datetime as _rdp_dtparse
+                                    _rdp_t = _rdp_dtparse.strptime(_rdp_time_str.strip(), "%H:%M")
+                                    _rdp_time_disp = _rdp_t.strftime("%-I:%M %p")
+                                except Exception:
+                                    _rdp_time_disp = _rdp_time_str
+                                _rdp_date_disp = f"{_rdp_date_str} {_rdp_time_disp}" if _rdp_date_str else _rdp_time_disp
+                            else:
+                                _rdp_date_disp = _rdp_date_str or "—"
+
+                            _rdp_cols = st.columns(_rdp_col_w)
+                            # No value= — session state (set during initialization above) is the source of truth
+                            _new_inc = _rdp_cols[0].checkbox(
+                                "",
+                                key=_chk_key,
+                                label_visibility="collapsed",
+                            )
+                            _rdp_cols[1].write(_rdp_date_disp)
+                            _rdp_cols[2].write(_rdp_row.get("track") or "—")
+                            _rdp_cols[3].write(_rdp_row.get("run_type") or "—")
+                            _rdp_cols[4].write(f"{_rdp_row['et']:.3f}")
+                            _rdp_mph = _rdp_row.get("mph")
+                            _rdp_cols[5].write(f"{float(_rdp_mph):.2f}" if _rdp_mph else "—")
+                            _rdp_cols[6].write(f"{int(round(_rdp_row['da'])):,}")
+                            _rdp_cols[7].markdown(_status_html, unsafe_allow_html=True)
+                            st.markdown(
+                                "<hr style='margin:2px 0;border-color:#222'>",
+                                unsafe_allow_html=True,
+                            )
+
+                            # Detect drift from DB for persistence (compare to predictor_exclude in DB)
+                            _db_excl = _rdp_row.get("predictor_exclude")
+                            _row_rtype    = _rdp_row.get("run_type", "")
+                            _row_rtype_ok = (not _row_rtype) or (_row_rtype in ("Full Pass", "Bye"))
+                            _row_iqr_ok   = not (_rdp_row["et"] < _rdp_lo or _rdp_row["et"] > _rdp_hi)
+                            _auto_default = _row_rtype_ok and _row_iqr_ok
+                            if _db_excl is True and _new_inc:
+                                _rdp_changes[_run_id] = True   # user re-included a DB-excluded run
+                            elif _db_excl is False and not _new_inc:
+                                _rdp_changes[_run_id] = False  # user re-excluded a DB-included run
+                            elif _db_excl is None and _new_inc != _auto_default:
+                                _rdp_changes[_run_id] = _new_inc  # user overrode the auto-default
 
                 st.caption(
                     f"{_rdp_n_incl} included · {len(_rdp_excluded)} excluded · "

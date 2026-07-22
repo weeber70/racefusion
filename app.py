@@ -1114,73 +1114,11 @@ elif _active_csv_name:
 
 st.sidebar.markdown("---")
 
-# ── Location
-st.sidebar.markdown("### 🌤️ Track Location")
-location_input = st.sidebar.text_input(
-    "City or track name",
-    value=cfg.get("location_name", ""),
-    placeholder="e.g. Union Grove WI",
-    help="Enter city name (no comma), or paste lat/lon coordinates like 42.694, -88.059",
-)
-if st.sidebar.button("Save location"):
-    if location_input.strip():
-        _sl_input = location_input.strip()
-        lat, lon, label = geocode(_sl_input)
-        _sl_elev_ft: float | None = None
-
-        if not lat:
-            # geocode() failed — try lookup_track() for drag-strip overrides + Nominatim queries
-            _sl_tk = lookup_track(_sl_input)
-            if _sl_tk:
-                lat, lon = _sl_tk["lat"], _sl_tk["lon"]
-                label = _sl_tk["display_name"]
-                _sl_elev_ft = _sl_tk.get("elev_ft")
-
-        if not lat:
-            # Still nothing — try Nominatim directly with the exact input text
-            # (handles "Track Name, City, State" typed verbatim)
-            try:
-                _sl_nom_r = requests.get(
-                    "https://nominatim.openstreetmap.org/search",
-                    params={"q": _sl_input, "format": "json", "limit": 1,
-                            "email": "chris@weebenterprises.com"},
-                    headers={"User-Agent": "RaceFusion/1.0 chris@weebenterprises.com"},
-                    timeout=10,
-                )
-                _sl_nom_hits = _sl_nom_r.json()
-                if _sl_nom_hits:
-                    lat  = float(_sl_nom_hits[0]["lat"])
-                    lon  = float(_sl_nom_hits[0]["lon"])
-                    label = (_sl_nom_hits[0].get("display_name") or _sl_input).split(",")[0].strip()
-            except Exception:
-                pass
-
-        if lat:
-            cfg["location_name"] = _sl_input
-            cfg["location_label"] = label
-            cfg["lat"] = lat
-            cfg["lon"] = lon
-            # Use elevation from lookup_track if available; otherwise fetch it
-            if _sl_elev_ft is not None:
-                cfg["elev_ft"] = _sl_elev_ft
-            else:
-                try:
-                    _sl_ev_r = requests.get(
-                        "https://api.open-meteo.com/v1/elevation",
-                        params={"latitude": lat, "longitude": lon},
-                        timeout=5,
-                    )
-                    _sl_ev_m = (_sl_ev_r.json().get("elevation") or [None])[0]
-                    cfg["elev_ft"] = float(_sl_ev_m) / 0.3048 if _sl_ev_m is not None else None
-                except Exception:
-                    cfg["elev_ft"] = None
-            save_config(cfg)
-            st.sidebar.success(f"Saved: {label}")
-        else:
-            st.sidebar.error("Location not found — try a different name.")
-
-if cfg.get("location_label"):
-    st.sidebar.caption(f"📍 {cfg['location_label']}")
+# ── Track Location sidebar removed (2026-07-21) ───────────────────────────────
+# Per-run weather is resolved from each run's own timeslip track, with an
+# explicit per-run prompt when geocoding fails (see run_analysis.py). The
+# Race Day Predictor has its own page-local track field. No global location
+# setting feeds the run/weather pipeline anymore.
 
 # ── Trial-expired banner (shown on every page when access is locked) ──────────
 if not _access_granted:

@@ -286,6 +286,13 @@ def show_run_analysis(
             """Float → display string (strips trailing zeros)."""
             return f"{float(v):g}" if v is not None else ""
 
+        def _fn3(v) -> str:
+            """Float → 3-decimal display string (standard timeslip precision)."""
+            try:
+                return f"{float(v):.3f}" if v is not None else ""
+            except (TypeError, ValueError):
+                return ""
+
         def _pn(s: str):
             """Parse text field → float or None."""
             try:
@@ -303,6 +310,15 @@ def show_run_analysis(
         if not _pt.get("_form_seeded"):
             _lane_seed = str(_sr.get("lane") or "").capitalize()
             _res_seed  = _normalize_slip_result(_sr.get("result"))
+            # Red light (negative RT) = automatic loss — pre-select Loss in the
+            # dropdown so the user SEES it on this screen and can override it,
+            # rather than it being applied silently at save time.
+            if _res_seed not in ("Win", "Loss", "Bye"):
+                try:
+                    if float(_sr.get("reaction_time")) < 0:
+                        _res_seed = "Loss"
+                except (TypeError, ValueError):
+                    pass
             st.session_state.update({
                 "vld_track":   _sr.get("track_name") or "",
                 "vld_loc":     _sr.get("track_location") or "",
@@ -313,14 +329,14 @@ def show_run_analysis(
                 "vld_lane":    _lane_seed if _lane_seed in ("", "Left", "Right") else "",
                 "vld_result":  _res_seed  if _res_seed  in ("", "Win", "Loss", "Bye") else "",
                 "vld_dial":    _fn(_sr.get("dial_in")),
-                "vld_rt":      _fn(_sr.get("reaction_time")),
-                "vld_ft60":    _fn(_sr.get("ft_60")),
-                "vld_ft330":   _fn(_sr.get("ft_330")),
-                "vld_ft660":   _fn(_sr.get("ft_660")),
-                "vld_mph660":  _fn(_sr.get("mph_660")),
-                "vld_ft1000":  _fn(_sr.get("ft_1000")),
-                "vld_et":      _fn(_sr.get("ft_1320")),
-                "vld_mph":     _fn(_sr.get("mph_1320")),
+                "vld_rt":      _fn3(_sr.get("reaction_time")),
+                "vld_ft60":    _fn3(_sr.get("ft_60")),
+                "vld_ft330":   _fn3(_sr.get("ft_330")),
+                "vld_ft660":   _fn3(_sr.get("ft_660")),
+                "vld_mph660":  _fn3(_sr.get("mph_660")),
+                "vld_ft1000":  _fn3(_sr.get("ft_1000")),
+                "vld_et":      _fn3(_sr.get("ft_1320")),
+                "vld_mph":     _fn3(_sr.get("mph_1320")),
             })
             _pt["_form_seeded"] = True
 
@@ -350,14 +366,14 @@ def show_run_analysis(
 
         with _v_right:
             st.markdown("**Timing (seconds)**")
-            _v_rt_s    = st.text_input("Reaction time",      value=_fn(_sr.get("reaction_time")),     key="vld_rt")
-            _v_ft60_s  = st.text_input("60ft",               value=_fn(_sr.get("ft_60")),             key="vld_ft60")
-            _v_ft330_s = st.text_input("330ft",              value=_fn(_sr.get("ft_330")),            key="vld_ft330")
-            _v_ft660_s = st.text_input("660ft",              value=_fn(_sr.get("ft_660")),            key="vld_ft660")
-            _v_mph660_s= st.text_input("660 MPH",            value=_fn(_sr.get("mph_660")),           key="vld_mph660")
-            _v_ft1000_s= st.text_input("1000ft",             value=_fn(_sr.get("ft_1000")),           key="vld_ft1000")
-            _v_et_s    = st.text_input("1/4 ET (s)",         value=_fn(_sr.get("ft_1320")),           key="vld_et")
-            _v_mph_s   = st.text_input("Trap MPH",           value=_fn(_sr.get("mph_1320")),          key="vld_mph")
+            _v_rt_s    = st.text_input("Reaction time",      value=_fn3(_sr.get("reaction_time")),    key="vld_rt")
+            _v_ft60_s  = st.text_input("60ft",               value=_fn3(_sr.get("ft_60")),            key="vld_ft60")
+            _v_ft330_s = st.text_input("330ft",              value=_fn3(_sr.get("ft_330")),           key="vld_ft330")
+            _v_ft660_s = st.text_input("660ft",              value=_fn3(_sr.get("ft_660")),           key="vld_ft660")
+            _v_mph660_s= st.text_input("660 MPH",            value=_fn3(_sr.get("mph_660")),          key="vld_mph660")
+            _v_ft1000_s= st.text_input("1000ft",             value=_fn3(_sr.get("ft_1000")),          key="vld_ft1000")
+            _v_et_s    = st.text_input("1/4 ET (s)",         value=_fn3(_sr.get("ft_1320")),          key="vld_et")
+            _v_mph_s   = st.text_input("Trap MPH",           value=_fn3(_sr.get("mph_1320")),         key="vld_mph")
 
         # Parse all numeric text fields
         _v_dial   = _pn(_v_dial_s)
@@ -388,12 +404,23 @@ def show_run_analysis(
             _vld_parts = []
             if _nerr:  _vld_parts.append(f"{_nerr} error{'s' if _nerr > 1 else ''}")
             if _nwarn: _vld_parts.append(f"{_nwarn} warning{'s' if _nwarn > 1 else ''}")
-            st.markdown(f"**Validation: {', '.join(_vld_parts)}**")
+            if _vld_parts:
+                st.markdown(f"**Validation: {', '.join(_vld_parts)}**")
             for _w in _vld_issues:
                 if _w["level"] == "error":
                     st.error(_w["message"])
+                elif _w["level"] == "info":
+                    # Neutral note (e.g. red light) — valid outcome, not bad data
+                    st.info(_w["message"], icon="🔴")
                 else:
                     st.warning(_w["message"])
+
+        # Red light = automatic loss — auto-suggest Result if not already set
+        try:
+            if _v_rt is not None and float(_v_rt) < 0 and not _v_result:
+                st.caption("🔴 Negative reaction = red light. Result will be saved as **Loss** unless you pick otherwise above.")
+        except (TypeError, ValueError):
+            pass
 
         _vb1, _vb2 = st.columns(2)
         _vld_confirm = _vb1.button("✅ Confirm & Save", type="primary", key="vld_confirm")
@@ -421,6 +448,15 @@ def show_run_analysis(
                 "ft_1320":        _v_et,
                 "mph_1320":       _v_mph,
             })
+            # Red light (negative RT) = automatic loss — auto-set Result
+            # when the user left it blank.
+            try:
+                if (_confirmed.get("reaction_time") is not None
+                        and float(_confirmed["reaction_time"]) < 0
+                        and not _confirmed.get("result")):
+                    _confirmed["result"] = "Loss"
+            except (TypeError, ValueError):
+                pass
             _pt_run_rec = dict(_pt["run_rec"])
             _pt_run_rec["timeslip"] = _confirmed
 
@@ -441,6 +477,10 @@ def show_run_analysis(
                         _conf_hour = int(str(_confirmed["time"]).split(":")[0])
                     except Exception:
                         _conf_hour = 12
+                # Weather is resolved from THIS run's own track only. No
+                # fallback to any global/stored location — if the lookup
+                # fails, weather is skipped here and the run page shows an
+                # explicit per-run location prompt instead.
                 _wx_lat2, _wx_lon2, _wx_label2 = None, None, ""
                 _tname2 = _confirmed.get("track_name", "")
                 _tloc2  = _confirmed.get("track_location", "")
@@ -448,16 +488,6 @@ def show_run_analysis(
                     _tk2 = lookup_track(_tname2, _tloc2)
                     if _tk2:
                         _wx_lat2, _wx_lon2, _wx_label2 = _tk2["lat"], _tk2["lon"], _tk2["display_name"]
-                        cfg["location_name"]  = _tname2 or _tloc2
-                        cfg["location_label"] = _tk2["display_name"]
-                        cfg["lat"]    = _tk2["lat"]
-                        cfg["lon"]    = _tk2["lon"]
-                        cfg["elev_ft"] = _tk2.get("elev_ft")
-                        save_config(cfg)
-                if _wx_lat2 is None and cfg.get("lat"):
-                    _wx_lat2   = cfg["lat"]
-                    _wx_lon2   = cfg["lon"]
-                    _wx_label2 = cfg.get("location_label", "")
                 if _wx_lat2 is not None:
                     try:
                         _wx2 = fetch_weather(_wx_lat2, _wx_lon2, _conf_date, _conf_hour)
@@ -1365,21 +1395,11 @@ def show_run_analysis(
                 if _tk_ws:
                     wx_lat, wx_lon, wx_label = _tk_ws["lat"], _tk_ws["lon"], _tk_ws["display_name"]
                     _geo_status.update(label=f"📍 {wx_label}", state="complete", expanded=False)
-                    # Auto-save track location to user config
-                    cfg["location_name"]  = _track_name_ws or _track_loc_ws
-                    cfg["location_label"] = _tk_ws["display_name"]
-                    cfg["lat"] = _tk_ws["lat"]
-                    cfg["lon"] = _tk_ws["lon"]
-                    cfg["elev_ft"] = _tk_ws.get("elev_ft")
-                    save_config(cfg)
                 else:
                     _geo_status.update(label=f"📍 Couldn't locate '{_track_label_ws}'", state="error", expanded=False)
 
-        if wx_lat is None and cfg.get("lat"):
-            wx_lat = cfg["lat"]
-            wx_lon = cfg["lon"]
-            wx_label = cfg.get("location_label", "")
-
+        # NO fallback to any global/stored location — weather must come from
+        # THIS run's own track, or from the explicit per-run prompt below.
         if wx_lat is not None:
             with st.sidebar.status("🌤️ Fetching weather…", expanded=False) as _wx_status:
                 try:
@@ -1402,7 +1422,64 @@ def show_run_analysis(
                     _wx_status.update(label="❌ Weather fetch failed", state="error", expanded=True)
                     st.sidebar.warning(f"Weather fetch failed: {e}")
         else:
-            st.sidebar.info("📍 No track location found. Enter one in Track Location below to fetch weather.")
+            # ── Explicit per-run location prompt ──────────────────────────────
+            # RaceFusion couldn't confidently place this run's track. Ask the
+            # user right now — weather never falls back to a stored global.
+            _wxm_track_lbl = _track_label_ws or "this run's track"
+            st.warning(
+                f"📍 Couldn't locate **{_wxm_track_lbl}** — "
+                "weather for this run hasn't been fetched. Confirm or enter the "
+                "correct track/city below and RaceFusion will pull the weather "
+                "for this run's date and time.",
+                icon="🌤️",
+            )
+            _wxm_c1, _wxm_c2 = st.columns([3, 1], vertical_alignment="bottom")
+            _wx_manual_loc = _wxm_c1.text_input(
+                "Track or city for this run",
+                value=_track_label_ws,
+                key=f"wx_manual_loc_{csv_name}",
+                placeholder="e.g. Gainesville Raceway — or Gainesville, FL",
+            )
+            if _wxm_c2.button(
+                "📍 Fetch weather", key=f"wx_manual_btn_{csv_name}",
+                type="primary", use_container_width=True,
+            ):
+                _wxm_input = _wx_manual_loc.strip()
+                if not _wxm_input:
+                    st.error("Enter a track or city first.")
+                else:
+                    with st.spinner(f"📍 Locating {_wxm_input}…"):
+                        _wxm_lat, _wxm_lon, _wxm_label = None, None, ""
+                        _wxm_tk = lookup_track(_wxm_input)
+                        if _wxm_tk:
+                            _wxm_lat   = _wxm_tk["lat"]
+                            _wxm_lon   = _wxm_tk["lon"]
+                            _wxm_label = _wxm_tk["display_name"]
+                        else:
+                            _wxm_lat, _wxm_lon, _wxm_label = geocode(_wxm_input)
+                    if _wxm_lat is None:
+                        st.error(
+                            f"Couldn't locate \"{_wxm_input}\" — try a nearby "
+                            "city and state instead."
+                        )
+                    else:
+                        with st.spinner("🌤️ Fetching weather…"):
+                            try:
+                                _wxm = fetch_weather(_wxm_lat, _wxm_lon, date_str, hour)
+                                _wxm_da = calc_density_altitude(
+                                    _wxm.get("temperature_f"), _wxm.get("pressure_hpa")
+                                )
+                                if _wxm_da is not None:
+                                    _wxm["density_alt_ft"] = round(_wxm_da)
+                                run["weather"] = _wxm
+                                run["weather_date"] = date_str
+                                run["weather_location"] = _wxm_label or _wxm_input
+                                save_run(csv_name, run)
+                                st.session_state["active_run_id"] = csv_name
+                                st.query_params["run"] = csv_name
+                                st.rerun()
+                            except Exception as _wxm_err:
+                                st.error(f"Weather fetch failed: {_wxm_err}")
 
     # _rd and _changelog loaded here so they're available throughout the dashboard
     # Merge car_profile defaults with whatever is already saved in run_details so that:
@@ -1590,6 +1667,50 @@ def show_run_analysis(
     if df is not None and "Boost Press" in df.columns:
         c6.metric("Peak Boost", f"{df['Boost Press'].max():.1f} psi")
 
+    # ── Run Alerts banner — directly below the Peak stats row ────────────────────
+    _alert_rules = cfg.get("channel_rules", {})
+    if _alert_rules and df is not None:
+        _alerts = check_alerts(df, time_col, _alert_rules)
+        if _alerts:
+            _alert_html = ""
+            for a in _alerts:
+                if a["rule_type"] == "max":
+                    _icon = "🔴"
+                    _detail = (
+                        f'exceeded maximum of <strong>{a["threshold"]}</strong> — '
+                        f'reached <strong>{a["value"]:.1f}</strong> at {a["time_s"]:.2f}s'
+                    )
+                else:
+                    _icon = "🔵"
+                    _detail = (
+                        f'dropped below minimum of <strong>{a["threshold"]}</strong> — '
+                        f'low was <strong>{a["value"]:.1f}</strong> at {a["time_s"]:.2f}s'
+                    )
+                _alert_html += (
+                    f'<div style="margin:6px 0;font-size:0.95rem;color:#ffffff;">'
+                    f'{_icon} <strong>{a["channel"]}</strong> {_detail}'
+                    f'</div>'
+                )
+            st.markdown(
+                f"""<div style="
+                    background:#cc1111;
+                    border:2px solid #ff4444;
+                    border-radius:10px;
+                    padding:14px 18px;
+                    margin-bottom:16px;
+                ">
+                <div style="font-size:1.1rem;font-weight:700;color:#ff9999;margin-bottom:8px;">
+                    ⚠️ Run Alerts — {len(_alerts)} threshold violation{'s' if len(_alerts)!=1 else ''}
+                </div>
+                {_alert_html}
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+        else:
+            st.success("✅ All channels within defined limits for this run.", icon="✅")
+            st.markdown("")
+
     st.markdown("---")
 
     # ── Run Details & Changelog ───────────────────────────────────────────────────
@@ -1764,7 +1885,7 @@ def show_run_analysis(
                 }
                 _rd_update_profile = st.checkbox(
                     "Save this setup as my new default",
-                    value=False,
+                    value=True,
                     key=f"rd_update_profile_{_rk}",
                 )
                 _rd_submitted = st.form_submit_button("💾 Save Run Details", use_container_width=True, type="primary")
@@ -1810,6 +1931,12 @@ def show_run_analysis(
 
         if _rd_saved_msg:
             st.success("Run details saved.")
+
+        # Read-only Run Details card renders into this slot (populated later)
+        # so it sits directly under the Run Details expander, left column.
+        _slot_run_details_card = st.container()
+        # Row 2 left: Car Profile card, directly below Run Details.
+        _slot_car_profile = st.container()
 
     # ── Right: Changes from last run (auto-diff) ──────────────────────────────────
     with _main_right:
@@ -1925,512 +2052,488 @@ def show_run_analysis(
                 else:
                     st.caption("No setup changes from previous run.")
 
-    st.markdown("---")
+        # Timeslip card renders into this slot (populated later) so it sits
+        # directly under the Changes expander, right column — side-by-side
+        # with the Run Details card.
+        _slot_timeslip = st.container()
+        # Row 2 right: Weather at Run Time, directly below Timeslip.
+        _slot_weather = st.container()
 
-    # ── AI Virtual Tuner ──────────────────────────────────────────────────────────
-    st.markdown("## 🤖 AI Virtual Tuner")
-    if not has_feature("ai_tuner"):
-        st.info("🤖 AI Virtual Tuner available on Pro.")
-        if st.button("⬆️ Upgrade to Pro", key="ai_tuner_upgrade_btn"):
-            _sv = st.query_params.get("session", "")
-            st.query_params.clear()
-            if _sv:
-                st.query_params["session"] = _sv
-            st.query_params["p"] = "upgrade"
-            st.session_state["current_page"] = "upgrade"
-            st.rerun()
-        st.markdown(
-            "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
-            "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
-            "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
-            "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
-            "text-decoration:none;'>Contact Us</a></div>",
-            unsafe_allow_html=True,
-        )
-        st.stop()
+    # Row 3: Estimated Rear-Wheel Horsepower, full width below the card rows.
+    _slot_rwhp = st.container()
 
-    def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list,
-                          allsaved_runs: list, car_cfg: dict) -> str:
-        import json as _json
+    # ── AI Virtual Tuner + Run Alerts — DEFERRED ─────────────────────────────────
+    # Wrapped in a function so it can render at the very BOTTOM of the page
+    # (Row 4), after RWHP — called from both the timeslip-only branch and the
+    # end of the CSV path. All referenced names are defined before the calls.
+    def _render_ai_tuner_section():
+        # ── AI Virtual Tuner ──────────────────────────────────────────────────────────
+        st.markdown("## 🤖 AI Virtual Tuner")
+        if not has_feature("ai_tuner"):
+            st.info("🤖 AI Virtual Tuner available on Pro.")
+            if st.button("⬆️ Upgrade to Pro", key="ai_tuner_upgrade_btn"):
+                _sv = st.query_params.get("session", "")
+                st.query_params.clear()
+                if _sv:
+                    st.query_params["session"] = _sv
+                st.query_params["p"] = "upgrade"
+                st.session_state["current_page"] = "upgrade"
+                st.rerun()
+            st.markdown(
+                "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
+                "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
+                "© 2025 Weeb Enterprises, LLC · RaceFusion™ · All rights reserved · "
+                "<a href='mailto:chris@weebenterprises.com' style='color:rgba(255,255,255,0.35);"
+                "text-decoration:none;'>Contact Us</a></div>",
+                unsafe_allow_html=True,
+            )
+            st.stop()
 
-        slip = run_rec.get("timeslip", {})
-        wx   = run_rec.get("weather", {})
-        rd   = run_rec.get("run_details", {})
+        def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list,
+                              allsaved_runs: list, car_cfg: dict) -> str:
+            import json as _json
 
-        # ── Full channel stats for current run ────────────────────────────────────
-        ch_stats = {}
-        if df is not None:
-            for ch in available_channels:
-                s = df[ch].dropna()
-                if len(s) > 5:
-                    ch_stats[ch] = {
-                        "min":  round(float(s.min()), 3),
-                        "max":  round(float(s.max()), 3),
-                        "mean": round(float(s.mean()), 3),
-                        "std":  round(float(s.std()), 3),
-                    }
+            slip = run_rec.get("timeslip", {})
+            wx   = run_rec.get("weather", {})
+            rd   = run_rec.get("run_details", {})
 
-        # ── Time-series snapshots for key channels (sampled every 0.1s) ──────────
-        key_traces = {}
-        if df is not None:
-            _time_col_ai = next((c for c in df.columns if "time" in c.lower()), None)
-            _key_chs = [c for c in [
-                "Engine RPM", "Boost Press", "Fuel Press", "Fuel Flow",
-                "Accel G", "Oil Press", "Water Temp", "Driveshaft RPM",
-                "Avg. EGT", "Cyl #1","Cyl #2","Cyl #3","Cyl #4",
-                "Cyl #5","Cyl #6","Cyl #7","Cyl #8",
-            ] if c in df.columns]
-            if _time_col_ai and _key_chs:
-                _df_s = df[[_time_col_ai] + _key_chs].copy()
-                _df_s = _df_s[_df_s[_time_col_ai] >= 0]
-                # Sample ~every 0.25s to keep payload size manageable
-                _df_s = _df_s.iloc[::max(1, len(_df_s)//200)]
-                for _c in _key_chs:
-                    key_traces[_c] = [
-                        [round(float(r[_time_col_ai]), 2), round(float(r[_c]), 2)]
-                        for _, r in _df_s[[_time_col_ai, _c]].dropna().iterrows()
-                    ]
+            # ── Full channel stats for current run ────────────────────────────────────
+            ch_stats = {}
+            if df is not None:
+                for ch in available_channels:
+                    s = df[ch].dropna()
+                    if len(s) > 5:
+                        ch_stats[ch] = {
+                            "min":  round(float(s.min()), 3),
+                            "max":  round(float(s.max()), 3),
+                            "mean": round(float(s.mean()), 3),
+                            "std":  round(float(s.std()), 3),
+                        }
 
-        # ── Previous runs: timeslip, weather, channel stats, changelog ────────────
-        # Build in chronological order (oldest first) so Run 1 = oldest
-        _other_runs = [s for s in reversed(allsaved_runs) if s["filename"] != csv_name]
-        prev_runs = []
-        for _run_idx, saved in enumerate(_other_runs, start=1):
-            if saved["filename"] == csv_name:
-                continue
-            rec  = saved["record"]
-            s    = rec.get("timeslip", {})
-            p_wx = rec.get("weather", {})
-            p_rd = rec.get("run_details", {})
-            # Load that run's CSV for channel stats if available
-            p_ch = {}
-            _p_csv_bytes = load_run_csv_bytes(saved["filename"])
-            if _p_csv_bytes:
-                try:
-                    _p_df = load_racepak_csv(_p_csv_bytes)
-                    for ch in _p_df.columns:
-                        _s = _p_df[ch].dropna()
-                        if len(_s) > 5 and _s.std() > 0.001:
-                            p_ch[ch] = {
-                                "min":  round(float(_s.min()), 3),
-                                "max":  round(float(_s.max()), 3),
-                                "mean": round(float(_s.mean()), 3),
-                            }
-                except Exception:
-                    pass
-            # DA: prefer timeslip value, then stored weather value, then compute from raw wx
-            _p_da = (s.get("density_alt_ft") or
-                     p_wx.get("density_alt_ft") or
-                     calc_density_altitude(p_wx.get("temperature_f"),
-                                           p_wx.get("pressure_hpa")))
-            if _p_da is not None:
-                _p_da = round(_p_da)
-            _run_date = s.get("date", "") or ""
-            _run_label = f"Run {_run_idx}" + (f" ({_run_date})" if _run_date else "")
-            prev_runs.append({
-                "label":         _run_label,
-                "filename":      saved["filename"],
-                "date":          _run_date,
-                "track":         s.get("track_name", "") or s.get("track_location", ""),
-                "timeslip": {
-                    "reaction":  s.get("reaction_time"),
-                    "ft_60":     s.get("ft_60"),
-                    "ft_330":    s.get("ft_330"),
-                    "ft_660":    s.get("ft_660"),
-                    "mph_660":   s.get("mph_660"),
-                    "ft_1000":   s.get("ft_1000"),
-                    "et_1320":   s.get("ft_1320"),
-                    "mph_1320":  s.get("mph_1320"),
-                },
-                "weather": {
-                    "temp_f":       p_wx.get("temperature_f"),
-                    "humidity_pct": p_wx.get("humidity_pct"),
-                    "baro_inhg":    round(p_wx.get("pressure_hpa", 0) * 0.02953, 2) if p_wx.get("pressure_hpa") else None,
-                    "density_alt_ft": _p_da,
-                    "wind":         s.get("wind"),
-                },
-                "run_details":   p_rd,
-                "delay_box_sec": rec.get("delay_box"),
-                "channel_stats": p_ch,
-                "changelog":     rec.get("changelog", []),
-                "notes":         p_rd.get("notes", ""),
-            })
+            # ── Time-series snapshots for key channels (sampled every 0.1s) ──────────
+            key_traces = {}
+            if df is not None:
+                _time_col_ai = next((c for c in df.columns if "time" in c.lower()), None)
+                _key_chs = [c for c in [
+                    "Engine RPM", "Boost Press", "Fuel Press", "Fuel Flow",
+                    "Accel G", "Oil Press", "Water Temp", "Driveshaft RPM",
+                    "Avg. EGT", "Cyl #1","Cyl #2","Cyl #3","Cyl #4",
+                    "Cyl #5","Cyl #6","Cyl #7","Cyl #8",
+                ] if c in df.columns]
+                if _time_col_ai and _key_chs:
+                    _df_s = df[[_time_col_ai] + _key_chs].copy()
+                    _df_s = _df_s[_df_s[_time_col_ai] >= 0]
+                    # Sample ~every 0.25s to keep payload size manageable
+                    _df_s = _df_s.iloc[::max(1, len(_df_s)//200)]
+                    for _c in _key_chs:
+                        key_traces[_c] = [
+                            [round(float(r[_time_col_ai]), 2), round(float(r[_c]), 2)]
+                            for _, r in _df_s[[_time_col_ai, _c]].dropna().iterrows()
+                        ]
 
-        # ── Car profile ───────────────────────────────────────────────────────────
-        # Source priority:
-        #   1. run_data['car_snapshot'] — config as it was when the run was made
-        #   2. current cars.build_sheet via the run's car_id
-        #   3. legacy flat keys in user_configs (pre-Car-Profile-page accounts)
-        _car_specs = run_rec.get("car_snapshot") or {}
-        _specs_source = "car_snapshot (config at race time)" if _car_specs else ""
-        if not _car_specs:
-            _bs_cid = ""
-            if _sb:
-                try:
-                    _cid_rows = _sb.table("runs").select("car_id") \
-                        .eq("username", current_user).eq("csv_filename", csv_name) \
-                        .execute().data
-                    _bs_cid = (_cid_rows[0].get("car_id") or "") if _cid_rows else ""
-                except Exception:
-                    _bs_cid = ""
-            if _bs_cid:
-                _car_specs = load_car_build_sheet(_bs_cid)
-                if _car_specs:
-                    _specs_source = "current build sheet (no race-time snapshot saved)"
+            # ── Previous runs: timeslip, weather, channel stats, changelog ────────────
+            # Build in chronological order (oldest first) so Run 1 = oldest
+            _other_runs = [s for s in reversed(allsaved_runs) if s["filename"] != csv_name]
+            prev_runs = []
+            for _run_idx, saved in enumerate(_other_runs, start=1):
+                if saved["filename"] == csv_name:
+                    continue
+                rec  = saved["record"]
+                s    = rec.get("timeslip", {})
+                p_wx = rec.get("weather", {})
+                p_rd = rec.get("run_details", {})
+                # Load that run's CSV for channel stats if available
+                p_ch = {}
+                _p_csv_bytes = load_run_csv_bytes(saved["filename"])
+                if _p_csv_bytes:
+                    try:
+                        _p_df = load_racepak_csv(_p_csv_bytes)
+                        for ch in _p_df.columns:
+                            _s = _p_df[ch].dropna()
+                            if len(_s) > 5 and _s.std() > 0.001:
+                                p_ch[ch] = {
+                                    "min":  round(float(_s.min()), 3),
+                                    "max":  round(float(_s.max()), 3),
+                                    "mean": round(float(_s.mean()), 3),
+                                }
+                    except Exception:
+                        pass
+                # DA: prefer timeslip value, then stored weather value, then compute from raw wx
+                _p_da = (s.get("density_alt_ft") or
+                         p_wx.get("density_alt_ft") or
+                         calc_density_altitude(p_wx.get("temperature_f"),
+                                               p_wx.get("pressure_hpa")))
+                if _p_da is not None:
+                    _p_da = round(_p_da)
+                _run_date = s.get("date", "") or ""
+                _run_label = f"Run {_run_idx}" + (f" ({_run_date})" if _run_date else "")
+                prev_runs.append({
+                    "label":         _run_label,
+                    "filename":      saved["filename"],
+                    "date":          _run_date,
+                    "track":         s.get("track_name", "") or s.get("track_location", ""),
+                    "timeslip": {
+                        "reaction":  s.get("reaction_time"),
+                        "ft_60":     s.get("ft_60"),
+                        "ft_330":    s.get("ft_330"),
+                        "ft_660":    s.get("ft_660"),
+                        "mph_660":   s.get("mph_660"),
+                        "ft_1000":   s.get("ft_1000"),
+                        "et_1320":   s.get("ft_1320"),
+                        "mph_1320":  s.get("mph_1320"),
+                    },
+                    "weather": {
+                        "temp_f":       p_wx.get("temperature_f"),
+                        "humidity_pct": p_wx.get("humidity_pct"),
+                        "baro_inhg":    round(p_wx.get("pressure_hpa", 0) * 0.02953, 2) if p_wx.get("pressure_hpa") else None,
+                        "density_alt_ft": _p_da,
+                        "wind":         s.get("wind"),
+                    },
+                    "run_details":   p_rd,
+                    "delay_box_sec": rec.get("delay_box"),
+                    "channel_stats": p_ch,
+                    "changelog":     rec.get("changelog", []),
+                    "notes":         p_rd.get("notes", ""),
+                })
 
-        if _car_specs:
-            # Build-sheet schema from the Car Profile page. Flag empty fields
-            # with the NOT SET sentinel — same convention the AI prompt expects.
-            def _bs_val(v):
-                if isinstance(v, dict):
-                    return {k: (sv if sv not in ("", None) else "NOT SET")
-                            for k, sv in v.items()}
-                return v if v not in ("", None) else "NOT SET"
+            # ── Car profile ───────────────────────────────────────────────────────────
+            # Source priority:
+            #   1. run_data['car_snapshot'] — config as it was when the run was made
+            #   2. current cars.build_sheet via the run's car_id
+            #   3. legacy flat keys in user_configs (pre-Car-Profile-page accounts)
+            _car_specs = run_rec.get("car_snapshot") or {}
+            _specs_source = "car_snapshot (config at race time)" if _car_specs else ""
+            if not _car_specs:
+                _bs_cid = ""
+                if _sb:
+                    try:
+                        _cid_rows = _sb.table("runs").select("car_id") \
+                            .eq("username", current_user).eq("csv_filename", csv_name) \
+                            .execute().data
+                        _bs_cid = (_cid_rows[0].get("car_id") or "") if _cid_rows else ""
+                    except Exception:
+                        _bs_cid = ""
+                if _bs_cid:
+                    _car_specs = load_car_build_sheet(_bs_cid)
+                    if _car_specs:
+                        _specs_source = "current build sheet (no race-time snapshot saved)"
 
-            car_profile = {k: _bs_val(v) for k, v in _car_specs.items()}
-            car_profile["_source"] = _specs_source
-        else:
-            # Legacy fallback: flat keys in user_configs
-            _gr = car_cfg.get("gear_ratios", {})
-            _num_g = int(car_cfg.get("num_gears", 2))
-            _gear_ratio_list = {
-                ["1st","2nd","3rd","4th","5th","6th"][i]: _gr.get(str(i+1)) or "NOT SET"
-                for i in range(_num_g)
-            }
-            # Flag missing specs so the AI can call them out
-            def _ms(val, label):
-                """Return value or a sentinel that tells the AI the field is missing."""
-                return val if val else f"NOT SET — {label} missing, analysis limited"
+            if _car_specs:
+                # Build-sheet schema from the Car Profile page. Flag empty fields
+                # with the NOT SET sentinel — same convention the AI prompt expects.
+                def _bs_val(v):
+                    if isinstance(v, dict):
+                        return {k: (sv if sv not in ("", None) else "NOT SET")
+                                for k, sv in v.items()}
+                    return v if v not in ("", None) else "NOT SET"
 
-            car_profile = {
-                "sanctioning_body": _ms(car_cfg.get("sanctioning_body", ""), "sanctioning body (NHRA/IHRA/NMCA/etc.) — needed to apply correct rulebook"),
-                "class_name":       _ms(car_cfg.get("class_name", ""), "class name — needed to determine index, dial-in rules, and performance limits"),
-                "engine":          _ms(car_cfg.get("engine_desc",""), "engine displacement/type"),
-                "fuel_type":       _ms(car_cfg.get("fuel_type",""), "fuel type — critical for EGT range, fuel flow, and power interpretation"),
-                "carburetor":      _ms(car_cfg.get("carb_desc",""), "carburetor/fuel system"),
-                "blower_type":     _ms(car_cfg.get("blower_type",""), "blower type (roots/screw)"),
-                "blower_style":    _ms(car_cfg.get("blower_style",""), "blower rotor style"),
-                "blower_size":     _ms(car_cfg.get("blower_size",""), "blower case size e.g. 14-71"),
-                "converter":       _ms(car_cfg.get("converter_desc",""), "converter stall speed and type"),
-                "transmission":    _ms(car_cfg.get("transmission",""), "transmission type"),
-                "num_gears":       _num_g,
-                "gear_ratios":     _gear_ratio_list,
-                "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — used for MPH sanity check: DS_RPM × rear_ratio × rollout / 12 / 5280 × 60 ≈ MPH"),
-                "suspension_type": _ms(car_cfg.get("suspension_type",""), "suspension type (hardtail/shocks) — affects 60ft interpretation"),
-                "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size"),
-                "weight_lbs":      car_cfg.get("car_weight_lbs","") or "NOT SET — needed for G-force and RWHP cross-check",
-                "notes":           car_cfg.get("car_notes",""),
-            }
-
-        payload = {
-            "car_profile": car_profile,
-            "current_run": {
-                "filename":      csv_name,
-                "timeslip": {
-                    "date":      slip.get("date"),
-                    "track":     slip.get("track_name") or slip.get("track_location"),
-                    "reaction":  slip.get("reaction_time"),
-                    "ft_60":     slip.get("ft_60"),
-                    "ft_330":    slip.get("ft_330"),
-                    "ft_660":    slip.get("ft_660"),
-                    "mph_660":   slip.get("mph_660"),
-                    "ft_1000":   slip.get("ft_1000"),
-                    "et_1320":   slip.get("ft_1320"),
-                    "mph_1320":  slip.get("mph_1320"),
-                    "issues":    slip.get("issues"),
-                },
-                "weather": {
-                    "temp_f":       wx.get("temperature_f"),
-                    "humidity_pct": wx.get("humidity_pct"),
-                    "baro_inhg":    round(wx.get("pressure_hpa", 0) * 0.02953, 2) if wx.get("pressure_hpa") else slip.get("baro_inhg"),
-                    "density_alt_ft": round(
-                        slip.get("density_alt_ft") or
-                        wx.get("density_alt_ft") or
-                        calc_density_altitude(wx.get("temperature_f"), wx.get("pressure_hpa")) or 0
-                    ) or None,
-                    "wind":         slip.get("wind"),
-                },
-                "run_details":   rd,
-                # Delay box setting (bracket/index racing) — affects how
-                # reaction time should be interpreted.
-                "delay_box_sec": run_rec.get("delay_box"),
-                "channel_stats": ch_stats,
-                "key_traces":    key_traces,
-                "changelog":     run_rec.get("changelog", []),
-                "notes":         rd.get("notes", ""),
-            },
-            "previous_runs": prev_runs,
-        }
-        return _json.dumps(payload, indent=2, default=str)
-
-    _ai_system = """\
-    IMPORTANT: This analysis is used by real drag racers as a crew chief tool. All facts, labels, and conclusions must be accurate. \
-    Do not state something is missing when it is present in the data. Do not mislabel calculated values. \
-    When in doubt, check the payload — the answer is in the data.
-
-    You are a seasoned drag racing crew chief with 20+ years running supercharged bracket and heads-up cars. \
-    You work with whatever data the driver has — timeslip splits, weather, RacePak channel data, changelog, and car specs. \
-    Not every driver has a data acquisition system. If channel_stats and key_traces are empty, that means no RacePak data is available for this run — \
-    skip the Channel Analysis section entirely and note at the end that adding a RacePak data logger would enable deeper analysis. \
-    Never refuse to analyze or say the data is insufficient — work with what is there and deliver maximum value from timeslip splits, weather, and run history. \
-    Think like a working tuner — specific numbers, direct cause-and-effect. If the data supports a claim, make it. If data is missing, say so and move on.
-
-    Respond in these exact sections, in order:
-
-    ## Run Overview
-    3–5 sentences: what the car ran, conditions, and the one-line headline (solid pass, soft launch, mechanical flag, etc.).
-
-    ## Timeslip Breakdown
-    Walk every split: reaction, 60ft, 330ft, 660ft, 1000ft, ET, MPH. \
-    Call out strong vs weak splits and what each means mechanically. \
-    A soft 60ft with a fast mid-track means the car came on strong after the hit. \
-    An ET gain without a corresponding MPH gain means the improvement came from the launch, not more power. \
-    Cross-check the ET and MPH against car weight using the Hale formula: RWHP ≈ weight × (mph/234)³. \
-    This formula produces rear-wheel horsepower (RWHP), not flywheel HP — always label this value as RWHP in your analysis, never as "flywheel HP" or "HP at the flywheel." \
-    If gear ratios are provided, validate driveshaft RPM against engine RPM at each shift point using: \
-      expected_DS_RPM = engine_RPM / gear_ratio. \
-    The DS RPM channel is measured at the transmission output shaft — it does NOT include the rear-end ratio. \
-    If G-Meter MPH is available, sanity-check DS RPM calibration with: \
-      DS_RPM × rear_ratio × tire_rollout_inches / 12 / 5280 × 60 ≈ vehicle_MPH. \
-    Flag significant divergence between expected and measured DS RPM as possible driveshaft slip or tire spin — not a calibration error.
-
-    ## Cross-Run Comparison
-    Compare this run against every previous run using raw ET, 60ft, and MPH — do not compute or reference corrected ET. \
-    Note the DA for each run to give context (lower DA = better air = naturally faster). \
-    Use the run label field (e.g. "Run 1", "Run 2") to identify each run — never use raw filenames or timestamps. \
-    If no previous runs exist, say so and move on.
-
-    ## Changelog Impact
-    For each changelog entry (parameter changed FROM → TO before this run): \
-    did it help, hurt, or show no measurable effect? Cite specific split or channel numbers. \
-    If changelog is empty, say so.
-
-    ## Channel Analysis
-    (Skip this section entirely if no RacePak channel data is present — channel_stats and key_traces will be empty.)
-    Work through the RacePak data systematically:
-    - **EGTs**: Compute average EGT across all cylinders. Flag any cylinder more than ~75°F above average (lean) or below average (rich/misfire).
-    - **Boost**: Peak value, time to peak, any top-end falloff. For a roots blower, boost should rise and hold — late falloff can indicate belt slip or insufficient carb capacity. For a screw, expect a sharper initial spike.
-    - **Fuel pressure**: Stable through the run? Any drop at high RPM signals a supply problem.
-    - **Driveshaft RPM vs Engine RPM**: DS RPM is measured at the transmission output shaft (after the gearbox, before the rear end). \
-      Expected DS RPM at any shift point = engine_RPM / gear_ratio. Do NOT divide by rear ratio — that would give wheel RPM, which is not what this channel measures. \
-      Flag significant divergence between expected and measured DS RPM as driveshaft slip or tire spin.
-    - **Conv % Slip interpretation**: The raw Conv % Slip channel = (Engine_RPM − DS_RPM) / Engine_RPM × 100. \
-      This is NOT pure converter slip in gears other than 1:1 — the gear ratio creates an apparent offset. \
-      True converter slip = 1 − (DS_RPM × gear_ratio / Engine_RPM). In high gear (1:1), the raw value equals true converter slip directly. \
-      Do not flag the DS RPM channel as miscalibrated or incorrectly scaled — the channel and its calibration are correct.
-    - **G-force (Accel G)**: Peak G, when it occurs, how it trails off. Cross-check 60ft G against what is physically expected for the car weight — a 2,800 lb car can't sustain 2.0 G for 60ft.
-    - **Oil pressure**: Any dip at the top end signals oil starvation concern. Note peak RPM vs oil pressure minimum.
-    - Any other channel with a spike, dropout, or unexpected trend.
-
-    ## Anomalies & Concerns
-    List anything that looks wrong or needs watching. For each: which channel, when in the run, what value, why it matters. If nothing is anomalous, say "No anomalies detected."
-
-    ## Missing Specs
-    Check the car_profile in the data payload for fields whose value contains "NOT SET". List ONLY those fields — do not \
-    claim a field is missing if it has a value. If every field is populated, write: "All car profile fields are set — full analysis available." \
-    Never state that a field is missing when its value was provided in the data.
-
-    ## Next Run Recommendations
-    Exactly 3 numbered recommendations. Each must state: what to change, the specific target value or direction, and the direct reason from this run's data. No generic advice.
-
-    ---
-
-    ABSOLUTE RULES:
-
-    EGT DIRECTION — memorize this and never reverse it:
-    HIGH EGT (hot cylinder) = LEAN = not enough fuel. LOW EGT (cold cylinder) = RICH or misfiring. \
-    A cold cylinder is never lean. If you call a cold cylinder lean you are wrong.
-
-    FUEL TYPE — adjust all EGT interpretation and fuel flow expectations by fuel type:
-    - Gasoline: typical EGT range 1,100–1,450°F. Fuel flow readings are moderate. Lean limit is more critical — detonation risk.
-    - Methanol: typical EGT range 700–1,100°F. EGTs run significantly cooler than gasoline at the same power level. \
-      Fuel flow will be roughly 2× gasoline for equivalent power. A methanol car running 1,200°F EGTs is extremely lean. \
-      Rich methanol tune is safer; lean is engine-killing.
-    - Nitromethane: typical EGT range 500–900°F. Carries its own oxygen so it burns very differently. \
-      Fuel flow is very high by design. EGT spread interpretation is the same directionally but absolute values are much lower. \
-      If fuel_type is NOT SET, note that EGT range interpretation may be off and ask the user to set it.
-
-    WEATHER CORRECTION: Density altitude is pre-computed from actual temp/humidity/baro and included in the weather \
-    block for every run — use it directly, do not say it is missing or estimated. \
-
-    BLOWER TYPE CONTEXT:
-    - Roots blower: boost comes on hard at the hit, then tapers. Boost falloff at top end is normal.
-    - Screw blower: builds boost more linearly, holds better at high RPM. Expect sharper initial spike on a hi-helix screw.
-
-    SUSPENSION CONTEXT:
-    - Hardtail cars have no rear shock travel — 60ft is entirely dependent on tire prep, tire pressure, and launch RPM. \
-      Don't suggest suspension adjustment on a hardtail.
-    - Cars with shocks: 60ft variability may be shock-related; consider that in your launch analysis.
-
-    CLASS & SANCTIONING BODY COACHING:
-
-    The car profile includes two fields: sanctioning_body (e.g. NHRA, IHRA, NMCA, PDRA, local track) \
-    and class_name (e.g. Top Alcohol Dragster, Super Gas, Pro Mod, Bracket).
-
-    Use your knowledge of that sanctioning body's rulebook and that class to:
-    1. Determine whether it is an index class, a dial-in class, or an outright heads-up class.
-    2. Identify the class index or ET limit if one exists (e.g. NHRA Super Gas = 9.900, Super Comp = 8.900).
-    3. Identify any known performance limits, weight breaks, power-adder rules, or equipment restrictions.
-    4. Frame every single recommendation within those class rules.
-
-    INDEX / DIAL-IN CLASSES (e.g. Super Gas, Super Comp, Top Dragster, Bracket, Stock, Super Stock): \
-    Breaking out — running faster than the index or dial-in — is a LOSS. \
-    NEVER recommend making the car faster if it is already at or under index. \
-    All coaching must prioritize: (1) hitting the index/dial precisely, (2) run-to-run consistency, \
-    (3) reaction time. If the car broke out, recommend ways to slow it (pull timing, reduce boost, \
-    adjust converter stall). If it ran over index, find the lost time in splits and launch.
-
-    OUTRIGHT PERFORMANCE CLASSES (e.g. Top Alcohol, Pro Mod, Top Fuel, Funny Car): \
-    Goal is maximum ET and MPH every pass. Push for more power, better launch, tighter tune. \
-    Weather-corrected ET improvement is the primary metric.
-
-    BRACKET RACING: \
-    Driver sets their own dial-in. Goal is to run exactly the dial-in with the best possible reaction time. \
-    Read the dial_in field from the timeslip. Flag any breakout explicitly. \
-    Pedaling, coasting, or lifting is a valid tuning approach — mention it when relevant.
-
-    If sanctioning_body or class_name is NOT SET: \
-    Default to outright performance coaching, but explicitly tell the user that class-specific coaching \
-    requires filling in the Sanctioning Body and Class Name fields in the Car Profile sidebar. \
-    State what specific analysis is being limited by the missing information.
-
-    SPECIFICITY: Always quote the actual numbers from the data. \
-    "Boost peaked at 14.2 psi at 1.8s into the run" not "boost looked good." \
-    "#3 EGT averaged 180°F below the pack" not "one cylinder ran cold."
-    """
-
-    _ai_cache_key   = f"ai_response_{csv_name}"
-    _ai_history_key = f"ai_history_{csv_name}"
-
-    # Initialise conversation history if not present
-    if _ai_history_key not in st.session_state:
-        st.session_state[_ai_history_key] = []
-
-    _ai_col1, _ai_col2 = st.columns([1, 5])
-    _run_ai = _ai_col1.button("🤖 Analyze run", key="btn_analyze")
-    if st.session_state.get(_ai_cache_key):
-        _ai_col2.caption("Analysis cached — ask a follow-up below, or click Analyze to re-run")
-
-    if _run_ai:
-        if not api_key:
-            st.warning("⚠️ Add your Anthropic API key in the sidebar to use AI analysis.")
-        else:
-            with st.spinner("🤖 Analyzing with Claude — comparing all saved runs…"):
-                try:
-                    import anthropic as _anthropic
-                    _client = _anthropic.Anthropic(api_key=api_key)
-                    _payload = _build_ai_payload(csv_name, run, df, available_channels, saved_runs, cfg)
-                    _first_msg = {"role": "user", "content": f"Here is the run data to analyze:\n\n{_payload}"}
-                    _msg = _client.messages.create(
-                        model="claude-opus-4-8",
-                        max_tokens=8192,
-                        system=_ai_system,
-                        messages=[_first_msg],
-                    )
-                    _response_text = _msg.content[0].text
-                    st.session_state[_ai_cache_key] = _response_text
-                    # Reset conversation history to just this exchange
-                    st.session_state[_ai_history_key] = [
-                        _first_msg,
-                        {"role": "assistant", "content": _response_text},
-                    ]
-                except Exception as _e:
-                    st.error(f"AI analysis failed: {_e}")
-
-    if st.session_state.get(_ai_cache_key):
-        with st.container(border=True):
-            st.markdown(st.session_state[_ai_cache_key])
-
-        # ── Follow-up conversation ────────────────────────────────────────────────
-        _history = st.session_state[_ai_history_key]
-
-        # Render any prior follow-up exchanges (after the initial analysis pair)
-        for _turn in _history[2:]:
-            _role_label = "🧑 You" if _turn["role"] == "user" else "🤖 Tuner"
-            with st.container(border=True):
-                st.caption(_role_label)
-                st.markdown(_turn["content"])
-
-        # Inline follow-up input
-        st.markdown("**💬 Ask a follow-up question**")
-        _fu_col1, _fu_col2 = st.columns([5, 1])
-        _followup_text = _fu_col1.text_input(
-            "follow_up_input",
-            label_visibility="collapsed",
-            placeholder="e.g. What would you adjust on the fuel curve first?",
-            key=f"followup_input_{len(_history)}",
-        )
-        _send = _fu_col2.button("Send", key=f"followup_send_{len(_history)}")
-
-        if _send and _followup_text.strip():
-            if not api_key:
-                st.warning("⚠️ API key needed.")
+                car_profile = {k: _bs_val(v) for k, v in _car_specs.items()}
+                car_profile["_source"] = _specs_source
             else:
-                with st.spinner("Thinking…"):
+                # Legacy fallback: flat keys in user_configs
+                _gr = car_cfg.get("gear_ratios", {})
+                _num_g = int(car_cfg.get("num_gears", 2))
+                _gear_ratio_list = {
+                    ["1st","2nd","3rd","4th","5th","6th"][i]: _gr.get(str(i+1)) or "NOT SET"
+                    for i in range(_num_g)
+                }
+                # Flag missing specs so the AI can call them out
+                def _ms(val, label):
+                    """Return value or a sentinel that tells the AI the field is missing."""
+                    return val if val else f"NOT SET — {label} missing, analysis limited"
+
+                car_profile = {
+                    "sanctioning_body": _ms(car_cfg.get("sanctioning_body", ""), "sanctioning body (NHRA/IHRA/NMCA/etc.) — needed to apply correct rulebook"),
+                    "class_name":       _ms(car_cfg.get("class_name", ""), "class name — needed to determine index, dial-in rules, and performance limits"),
+                    "engine":          _ms(car_cfg.get("engine_desc",""), "engine displacement/type"),
+                    "fuel_type":       _ms(car_cfg.get("fuel_type",""), "fuel type — critical for EGT range, fuel flow, and power interpretation"),
+                    "carburetor":      _ms(car_cfg.get("carb_desc",""), "carburetor/fuel system"),
+                    "blower_type":     _ms(car_cfg.get("blower_type",""), "blower type (roots/screw)"),
+                    "blower_style":    _ms(car_cfg.get("blower_style",""), "blower rotor style"),
+                    "blower_size":     _ms(car_cfg.get("blower_size",""), "blower case size e.g. 14-71"),
+                    "converter":       _ms(car_cfg.get("converter_desc",""), "converter stall speed and type"),
+                    "transmission":    _ms(car_cfg.get("transmission",""), "transmission type"),
+                    "num_gears":       _num_g,
+                    "gear_ratios":     _gear_ratio_list,
+                    "rear_gear_ratio": _ms(car_cfg.get("rear_gear_ratio",""), "rear end ratio — used for MPH sanity check: DS_RPM × rear_ratio × rollout / 12 / 5280 × 60 ≈ MPH"),
+                    "suspension_type": _ms(car_cfg.get("suspension_type",""), "suspension type (hardtail/shocks) — affects 60ft interpretation"),
+                    "tire_size":       _ms(car_cfg.get("tire_size",""), "rear tire size"),
+                    "weight_lbs":      car_cfg.get("car_weight_lbs","") or "NOT SET — needed for G-force and RWHP cross-check",
+                    "notes":           car_cfg.get("car_notes",""),
+                }
+
+            payload = {
+                "car_profile": car_profile,
+                "current_run": {
+                    "filename":      csv_name,
+                    "timeslip": {
+                        "date":      slip.get("date"),
+                        "track":     slip.get("track_name") or slip.get("track_location"),
+                        "reaction":  slip.get("reaction_time"),
+                        "ft_60":     slip.get("ft_60"),
+                        "ft_330":    slip.get("ft_330"),
+                        "ft_660":    slip.get("ft_660"),
+                        "mph_660":   slip.get("mph_660"),
+                        "ft_1000":   slip.get("ft_1000"),
+                        "et_1320":   slip.get("ft_1320"),
+                        "mph_1320":  slip.get("mph_1320"),
+                        "issues":    slip.get("issues"),
+                    },
+                    "weather": {
+                        "temp_f":       wx.get("temperature_f"),
+                        "humidity_pct": wx.get("humidity_pct"),
+                        "baro_inhg":    round(wx.get("pressure_hpa", 0) * 0.02953, 2) if wx.get("pressure_hpa") else slip.get("baro_inhg"),
+                        "density_alt_ft": round(
+                            slip.get("density_alt_ft") or
+                            wx.get("density_alt_ft") or
+                            calc_density_altitude(wx.get("temperature_f"), wx.get("pressure_hpa")) or 0
+                        ) or None,
+                        "wind":         slip.get("wind"),
+                    },
+                    "run_details":   rd,
+                    # Delay box setting (bracket/index racing) — affects how
+                    # reaction time should be interpreted.
+                    "delay_box_sec": run_rec.get("delay_box"),
+                    "channel_stats": ch_stats,
+                    "key_traces":    key_traces,
+                    "changelog":     run_rec.get("changelog", []),
+                    "notes":         rd.get("notes", ""),
+                },
+                "previous_runs": prev_runs,
+            }
+            return _json.dumps(payload, indent=2, default=str)
+
+        _ai_system = """\
+        IMPORTANT: This analysis is used by real drag racers as a crew chief tool. All facts, labels, and conclusions must be accurate. \
+        Do not state something is missing when it is present in the data. Do not mislabel calculated values. \
+        When in doubt, check the payload — the answer is in the data.
+
+        You are a seasoned drag racing crew chief with 20+ years running supercharged bracket and heads-up cars. \
+        You work with whatever data the driver has — timeslip splits, weather, RacePak channel data, changelog, and car specs. \
+        Not every driver has a data acquisition system. If channel_stats and key_traces are empty, that means no RacePak data is available for this run — \
+        skip the Channel Analysis section entirely and note at the end that adding a RacePak data logger would enable deeper analysis. \
+        Never refuse to analyze or say the data is insufficient — work with what is there and deliver maximum value from timeslip splits, weather, and run history. \
+        Think like a working tuner — specific numbers, direct cause-and-effect. If the data supports a claim, make it. If data is missing, say so and move on.
+
+        Respond in these exact sections, in order:
+
+        ## Run Overview
+        3–5 sentences: what the car ran, conditions, and the one-line headline (solid pass, soft launch, mechanical flag, etc.).
+
+        ## Timeslip Breakdown
+        Walk every split: reaction, 60ft, 330ft, 660ft, 1000ft, ET, MPH. \
+        Call out strong vs weak splits and what each means mechanically. \
+        A soft 60ft with a fast mid-track means the car came on strong after the hit. \
+        An ET gain without a corresponding MPH gain means the improvement came from the launch, not more power. \
+        Cross-check the ET and MPH against car weight using the Hale formula: RWHP ≈ weight × (mph/234)³. \
+        This formula produces rear-wheel horsepower (RWHP), not flywheel HP — always label this value as RWHP in your analysis, never as "flywheel HP" or "HP at the flywheel." \
+        If gear ratios are provided, validate driveshaft RPM against engine RPM at each shift point using: \
+          expected_DS_RPM = engine_RPM / gear_ratio. \
+        The DS RPM channel is measured at the transmission output shaft — it does NOT include the rear-end ratio. \
+        If G-Meter MPH is available, sanity-check DS RPM calibration with: \
+          DS_RPM × rear_ratio × tire_rollout_inches / 12 / 5280 × 60 ≈ vehicle_MPH. \
+        Flag significant divergence between expected and measured DS RPM as possible driveshaft slip or tire spin — not a calibration error.
+
+        ## Cross-Run Comparison
+        Compare this run against every previous run using raw ET, 60ft, and MPH — do not compute or reference corrected ET. \
+        Note the DA for each run to give context (lower DA = better air = naturally faster). \
+        Use the run label field (e.g. "Run 1", "Run 2") to identify each run — never use raw filenames or timestamps. \
+        If no previous runs exist, say so and move on.
+
+        ## Changelog Impact
+        For each changelog entry (parameter changed FROM → TO before this run): \
+        did it help, hurt, or show no measurable effect? Cite specific split or channel numbers. \
+        If changelog is empty, say so.
+
+        ## Channel Analysis
+        (Skip this section entirely if no RacePak channel data is present — channel_stats and key_traces will be empty.)
+        Work through the RacePak data systematically:
+        - **EGTs**: Compute average EGT across all cylinders. Flag any cylinder more than ~75°F above average (lean) or below average (rich/misfire).
+        - **Boost**: Peak value, time to peak, any top-end falloff. For a roots blower, boost should rise and hold — late falloff can indicate belt slip or insufficient carb capacity. For a screw, expect a sharper initial spike.
+        - **Fuel pressure**: Stable through the run? Any drop at high RPM signals a supply problem.
+        - **Driveshaft RPM vs Engine RPM**: DS RPM is measured at the transmission output shaft (after the gearbox, before the rear end). \
+          Expected DS RPM at any shift point = engine_RPM / gear_ratio. Do NOT divide by rear ratio — that would give wheel RPM, which is not what this channel measures. \
+          Flag significant divergence between expected and measured DS RPM as driveshaft slip or tire spin.
+        - **Conv % Slip interpretation**: The raw Conv % Slip channel = (Engine_RPM − DS_RPM) / Engine_RPM × 100. \
+          This is NOT pure converter slip in gears other than 1:1 — the gear ratio creates an apparent offset. \
+          True converter slip = 1 − (DS_RPM × gear_ratio / Engine_RPM). In high gear (1:1), the raw value equals true converter slip directly. \
+          Do not flag the DS RPM channel as miscalibrated or incorrectly scaled — the channel and its calibration are correct.
+        - **G-force (Accel G)**: Peak G, when it occurs, how it trails off. Cross-check 60ft G against what is physically expected for the car weight — a 2,800 lb car can't sustain 2.0 G for 60ft.
+        - **Oil pressure**: Any dip at the top end signals oil starvation concern. Note peak RPM vs oil pressure minimum.
+        - Any other channel with a spike, dropout, or unexpected trend.
+
+        ## Anomalies & Concerns
+        List anything that looks wrong or needs watching. For each: which channel, when in the run, what value, why it matters. If nothing is anomalous, say "No anomalies detected."
+
+        ## Missing Specs
+        Check the car_profile in the data payload for fields whose value contains "NOT SET". List ONLY those fields — do not \
+        claim a field is missing if it has a value. If every field is populated, write: "All car profile fields are set — full analysis available." \
+        Never state that a field is missing when its value was provided in the data.
+
+        ## Next Run Recommendations
+        Exactly 3 numbered recommendations. Each must state: what to change, the specific target value or direction, and the direct reason from this run's data. No generic advice.
+
+        ---
+
+        ABSOLUTE RULES:
+
+        EGT DIRECTION — memorize this and never reverse it:
+        HIGH EGT (hot cylinder) = LEAN = not enough fuel. LOW EGT (cold cylinder) = RICH or misfiring. \
+        A cold cylinder is never lean. If you call a cold cylinder lean you are wrong.
+
+        FUEL TYPE — adjust all EGT interpretation and fuel flow expectations by fuel type:
+        - Gasoline: typical EGT range 1,100–1,450°F. Fuel flow readings are moderate. Lean limit is more critical — detonation risk.
+        - Methanol: typical EGT range 700–1,100°F. EGTs run significantly cooler than gasoline at the same power level. \
+          Fuel flow will be roughly 2× gasoline for equivalent power. A methanol car running 1,200°F EGTs is extremely lean. \
+          Rich methanol tune is safer; lean is engine-killing.
+        - Nitromethane: typical EGT range 500–900°F. Carries its own oxygen so it burns very differently. \
+          Fuel flow is very high by design. EGT spread interpretation is the same directionally but absolute values are much lower. \
+          If fuel_type is NOT SET, note that EGT range interpretation may be off and ask the user to set it.
+
+        WEATHER CORRECTION: Density altitude is pre-computed from actual temp/humidity/baro and included in the weather \
+        block for every run — use it directly, do not say it is missing or estimated. \
+
+        BLOWER TYPE CONTEXT:
+        - Roots blower: boost comes on hard at the hit, then tapers. Boost falloff at top end is normal.
+        - Screw blower: builds boost more linearly, holds better at high RPM. Expect sharper initial spike on a hi-helix screw.
+
+        SUSPENSION CONTEXT:
+        - Hardtail cars have no rear shock travel — 60ft is entirely dependent on tire prep, tire pressure, and launch RPM. \
+          Don't suggest suspension adjustment on a hardtail.
+        - Cars with shocks: 60ft variability may be shock-related; consider that in your launch analysis.
+
+        CLASS & SANCTIONING BODY COACHING:
+
+        The car profile includes two fields: sanctioning_body (e.g. NHRA, IHRA, NMCA, PDRA, local track) \
+        and class_name (e.g. Top Alcohol Dragster, Super Gas, Pro Mod, Bracket).
+
+        Use your knowledge of that sanctioning body's rulebook and that class to:
+        1. Determine whether it is an index class, a dial-in class, or an outright heads-up class.
+        2. Identify the class index or ET limit if one exists (e.g. NHRA Super Gas = 9.900, Super Comp = 8.900).
+        3. Identify any known performance limits, weight breaks, power-adder rules, or equipment restrictions.
+        4. Frame every single recommendation within those class rules.
+
+        INDEX / DIAL-IN CLASSES (e.g. Super Gas, Super Comp, Top Dragster, Bracket, Stock, Super Stock): \
+        Breaking out — running faster than the index or dial-in — is a LOSS. \
+        NEVER recommend making the car faster if it is already at or under index. \
+        All coaching must prioritize: (1) hitting the index/dial precisely, (2) run-to-run consistency, \
+        (3) reaction time. If the car broke out, recommend ways to slow it (pull timing, reduce boost, \
+        adjust converter stall). If it ran over index, find the lost time in splits and launch.
+
+        OUTRIGHT PERFORMANCE CLASSES (e.g. Top Alcohol, Pro Mod, Top Fuel, Funny Car): \
+        Goal is maximum ET and MPH every pass. Push for more power, better launch, tighter tune. \
+        Weather-corrected ET improvement is the primary metric.
+
+        BRACKET RACING: \
+        Driver sets their own dial-in. Goal is to run exactly the dial-in with the best possible reaction time. \
+        Read the dial_in field from the timeslip. Flag any breakout explicitly. \
+        Pedaling, coasting, or lifting is a valid tuning approach — mention it when relevant.
+
+        If sanctioning_body or class_name is NOT SET: \
+        Default to outright performance coaching, but explicitly tell the user that class-specific coaching \
+        requires filling in the Sanctioning Body and Class Name fields in the Car Profile sidebar. \
+        State what specific analysis is being limited by the missing information.
+
+        SPECIFICITY: Always quote the actual numbers from the data. \
+        "Boost peaked at 14.2 psi at 1.8s into the run" not "boost looked good." \
+        "#3 EGT averaged 180°F below the pack" not "one cylinder ran cold."
+        """
+
+        _ai_cache_key   = f"ai_response_{csv_name}"
+        _ai_history_key = f"ai_history_{csv_name}"
+
+        # Initialise conversation history if not present
+        if _ai_history_key not in st.session_state:
+            st.session_state[_ai_history_key] = []
+
+        _ai_col1, _ai_col2 = st.columns([1, 5])
+        _run_ai = _ai_col1.button("🤖 Analyze run", key="btn_analyze")
+        if st.session_state.get(_ai_cache_key):
+            _ai_col2.caption("Analysis cached — ask a follow-up below, or click Analyze to re-run")
+
+        if _run_ai:
+            if not api_key:
+                st.warning("⚠️ Add your Anthropic API key in the sidebar to use AI analysis.")
+            else:
+                with st.spinner("🤖 Analyzing with Claude — comparing all saved runs…"):
                     try:
                         import anthropic as _anthropic
                         _client = _anthropic.Anthropic(api_key=api_key)
-                        _history.append({"role": "user", "content": _followup_text.strip()})
-                        _fmsg = _client.messages.create(
+                        _payload = _build_ai_payload(csv_name, run, df, available_channels, saved_runs, cfg)
+                        _first_msg = {"role": "user", "content": f"Here is the run data to analyze:\n\n{_payload}"}
+                        _msg = _client.messages.create(
                             model="claude-opus-4-8",
-                            max_tokens=2048,
+                            max_tokens=8192,
                             system=_ai_system,
-                            messages=_history,
+                            messages=[_first_msg],
                         )
-                        _freply = _fmsg.content[0].text
-                        _history.append({"role": "assistant", "content": _freply})
-                        st.session_state[_ai_history_key] = _history
-                        st.session_state["active_run_id"] = csv_name
-                        st.query_params["run"] = csv_name
-                        st.rerun()
+                        _response_text = _msg.content[0].text
+                        st.session_state[_ai_cache_key] = _response_text
+                        # Reset conversation history to just this exchange
+                        st.session_state[_ai_history_key] = [
+                            _first_msg,
+                            {"role": "assistant", "content": _response_text},
+                        ]
                     except Exception as _e:
-                        st.error(f"Follow-up failed: {_e}")
+                        st.error(f"AI analysis failed: {_e}")
 
-    st.markdown("---")
+        if st.session_state.get(_ai_cache_key):
+            with st.container(border=True):
+                st.markdown(st.session_state[_ai_cache_key])
 
-    # ── Alerts banner ─────────────────────────────────────────────────────────────
-    _channel_rules = cfg.get("channel_rules", {})
-    if _channel_rules and df is not None:
-        _alerts = check_alerts(df, time_col, _channel_rules)
-        if _alerts:
-            _alert_html = ""
-            for a in _alerts:
-                if a["rule_type"] == "max":
-                    _icon = "🔴"
-                    _detail = (
-                        f'exceeded maximum of <strong>{a["threshold"]}</strong> — '
-                        f'reached <strong>{a["value"]:.1f}</strong> at {a["time_s"]:.2f}s'
-                    )
-                else:
-                    _icon = "🔵"
-                    _detail = (
-                        f'dropped below minimum of <strong>{a["threshold"]}</strong> — '
-                        f'low was <strong>{a["value"]:.1f}</strong> at {a["time_s"]:.2f}s'
-                    )
-                _alert_html += (
-                    f'<div style="margin:6px 0;font-size:0.95rem;color:#ffffff;">'
-                    f'{_icon} <strong>{a["channel"]}</strong> {_detail}'
-                    f'</div>'
-                )
-            st.markdown(
-                f"""<div style="
-                    background:#cc1111;
-                    border:2px solid #ff4444;
-                    border-radius:10px;
-                    padding:14px 18px;
-                    margin-bottom:16px;
-                ">
-                <div style="font-size:1.1rem;font-weight:700;color:#ff9999;margin-bottom:8px;">
-                    ⚠️ Run Alerts — {len(_alerts)} threshold violation{'s' if len(_alerts)!=1 else ''}
-                </div>
-                {_alert_html}
-                </div>""",
-                unsafe_allow_html=True,
+            # ── Follow-up conversation ────────────────────────────────────────────────
+            _history = st.session_state[_ai_history_key]
+
+            # Render any prior follow-up exchanges (after the initial analysis pair)
+            for _turn in _history[2:]:
+                _role_label = "🧑 You" if _turn["role"] == "user" else "🤖 Tuner"
+                with st.container(border=True):
+                    st.caption(_role_label)
+                    st.markdown(_turn["content"])
+
+            # Inline follow-up input
+            st.markdown("**💬 Ask a follow-up question**")
+            _fu_col1, _fu_col2 = st.columns([5, 1])
+            _followup_text = _fu_col1.text_input(
+                "follow_up_input",
+                label_visibility="collapsed",
+                placeholder="e.g. What would you adjust on the fuel curve first?",
+                key=f"followup_input_{len(_history)}",
             )
-            st.markdown("")
-        else:
-            st.success("✅ All channels within defined limits for this run.", icon="✅")
-            st.markdown("")
+            _send = _fu_col2.button("Send", key=f"followup_send_{len(_history)}")
+
+            if _send and _followup_text.strip():
+                if not api_key:
+                    st.warning("⚠️ API key needed.")
+                else:
+                    with st.spinner("Thinking…"):
+                        try:
+                            import anthropic as _anthropic
+                            _client = _anthropic.Anthropic(api_key=api_key)
+                            _history.append({"role": "user", "content": _followup_text.strip()})
+                            _fmsg = _client.messages.create(
+                                model="claude-opus-4-8",
+                                max_tokens=2048,
+                                system=_ai_system,
+                                messages=_history,
+                            )
+                            _freply = _fmsg.content[0].text
+                            _history.append({"role": "assistant", "content": _freply})
+                            st.session_state[_ai_history_key] = _history
+                            st.session_state["active_run_id"] = csv_name
+                            st.query_params["run"] = csv_name
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"Follow-up failed: {_e}")
+
+        # (no divider here — nothing meaningful to separate between the AI Tuner
+        # and whatever renders next; it drew a stray line above the footer)
+
+    # ── Page-level definitions (MUST stay outside _render_ai_tuner_section) ─────
+    # These were accidentally swept into the deferred function during the Row-4
+    # reorg: the charts section reads _cyl_channels long before the function is
+    # called (NameError), and the border-killing CSS must render unconditionally
+    # or every card table grows Streamlit's default row borders/padding.
 
     # Define EGT channels here so they can be excluded from group charts below
     _cyl_channels = [ch for ch in ["Cyl #1","Cyl #2","Cyl #3","Cyl #4",
@@ -2438,6 +2541,11 @@ def show_run_analysis(
                      if df is not None and ch in df.columns and not df[ch].dropna().empty]
     _avg_egt_ch = ("Avg. EGT" if df is not None and "Avg. EGT" in df.columns else None)
 
+    # Channel rules — needed by BOTH the EGT panel (inline, below) and the
+    # deferred alerts banner inside _render_ai_tuner_section (closure).
+    _channel_rules = cfg.get("channel_rules", {})
+
+    # Compact card tables: suppress Streamlit's default markdown-table borders
     st.markdown("""
     <style>
     div[data-testid="stMarkdownContainer"] table,
@@ -2458,10 +2566,60 @@ def show_run_analysis(
     _has_run_details = any(_rd_saved.get(k) for k in ("tire_pressure_fl","track_temp_f",
                                                         "launch_rpm","notes","result"))
 
-    _pc1, _pc2 = st.columns(2)
+    # ── Car Profile card — renders on EVERY run (static build-sheet info,
+    # nothing about it depends on channel data being present).
+    # Source priority: race-time car_snapshot → current cars.build_sheet →
+    # legacy flat cfg keys (pre-Car-Profile-page accounts).
+    _cp_specs = run.get("car_snapshot") or {}
+    if not _cp_specs and _run_car_id:
+        _cp_specs = load_car_build_sheet(_run_car_id)
 
-    if _has_car_profile:
-            with _pc1:
+    if _cp_specs:
+        _cp_gr = _cp_specs.get("gear_ratios") or {}
+        _cp_ratios = "  ".join(f"{_k}: {_v}" for _k, _v in _cp_gr.items() if _v)
+        _cp_engine = " · ".join(filter(None, [
+            _cp_specs.get("displacement", ""), _cp_specs.get("cylinder_head", ""),
+        ]))
+        _cp_pa = " ".join(filter(None, [
+            _cp_specs.get("bl_size", ""), _cp_specs.get("bl_brand", ""),
+            _cp_specs.get("power_adder_type", ""),
+        ]))
+        _cp_conv = " ".join(filter(None, [
+            _cp_specs.get("converter", ""),
+            f"{_cp_specs.get('stall_rpm')} stall" if _cp_specs.get("stall_rpm") else "",
+        ]))
+        _cp_weight = _cp_specs.get("weight_with_driver", "")
+        _cp_rows = ""
+        for _cpl, _cpv in [
+            ("Engine",        _cp_engine),
+            ("Fuel",          _cp_specs.get("fuel_type", "")),
+            ("Fuel Delivery", _cp_specs.get("fuel_delivery", "")),
+            ("Power Adder",   _cp_pa),
+            ("Converter",     _cp_conv),
+            ("Transmission",  _cp_specs.get("transmission_type", "")),
+            ("Gear Ratios",   _cp_ratios),
+            ("Rear Ratio",    _cp_specs.get("rear_gear_ratio", "")),
+            ("Suspension",    _cp_specs.get("rear_suspension", "")),
+            ("Front Tire",    _cp_specs.get("front_tire_size", "")),
+            ("Weight",        f"{_cp_weight} lbs w/driver" if _cp_weight else ""),
+        ]:
+            if _cpv:
+                _cp_rows += (
+                    f'<tr><td style="color:#888;padding:3px 8px 3px 0;white-space:nowrap;">{_cpl}</td>'
+                    f'<td style="color:#eee;text-align:right;">{_cpv}</td></tr>'
+                )
+        if _cp_rows:
+            with _slot_car_profile:
+                st.markdown(
+                    '<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;'
+                    'background:#0a0a0a;font-family:monospace;min-height:420px;margin-bottom:16px;">'
+                    '<div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;">🏎️ Car Profile</div>'
+                    f'<table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{_cp_rows}</table>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+    elif _has_car_profile:
+            with _slot_car_profile:
                 _blower_parts = list(filter(None, [
                     cfg.get("blower_size", ""),
                     cfg.get("blower_type", ""),
@@ -2501,7 +2659,7 @@ def show_run_analysis(
       <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{_profile_rows}</table>
     </div>""", unsafe_allow_html=True)
 
-    with _pc2:
+    with _slot_run_details_card:
         def _rd_row(label, val, fmt=None, unit="", highlight=False):
             """Return an HTML table row, or '' if val is falsy/zero."""
             if val is None or val == "" or val == 0 or val == 0.0:
@@ -2533,6 +2691,17 @@ def show_run_analysis(
             _result_rows  = (f'<tr><td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Result</td>'
                              f'<td style="color:{_result_color};font-weight:700;text-align:right;">'
                              f'{_result_icon} {_result_val}</td></tr>')
+
+        # ── Delay Box — lives at run_data level, not in run_details ──
+        _db_card_v = run.get("delay_box")
+        if _db_card_v:
+            try:
+                _result_rows += (
+                    f'<tr><td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Delay Box</td>'
+                    f'<td style="color:#eee;text-align:right;">{float(_db_card_v):.3f} s</td></tr>'
+                )
+            except (TypeError, ValueError):
+                pass
 
         # ── Tires ──
         _tfl = _r.get("tire_pressure_fl", 0) or 0
@@ -2607,15 +2776,16 @@ def show_run_analysis(
                            f'{_rnotes}</div>')
 
         st.markdown(f"""
-    <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;">
+    <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;min-height:480px;margin-bottom:16px;">
       <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;">
         📋 Run Details
       </div>
-      <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">{_rd_rows}</table>
+      <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">{_rd_rows}</table>
       {_notes_html}
     </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
+    # (no inline divider here — the cards above render into top-of-page slots,
+    # so a rule at this code location would draw a stray second line mid-page)
 
     # ── Timeslip + Weather cards ──────────────────────────────────────────────────
     slip = run.get("timeslip")
@@ -2626,61 +2796,65 @@ def show_run_analysis(
     wx = run.get("weather")
 
     if slip or wx:
-        left, right = st.columns(2)
+        # Cards render into the top-of-page slots: Timeslip (left, beside the
+        # Run Details card) and Weather (full width beneath the pair).
 
         # ── Timeslip card
         if slip:
-            with left:
+            with _slot_timeslip:
                 track = slip.get("track_name") or "—"
                 run_date = slip.get("date") or "—"
                 run_time = slip.get("time") or "—"
 
                 st.markdown(f"""
-    <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;">
+    <div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;min-height:480px;margin-bottom:16px;">
       <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:6px;">
         🎫 Timeslip — {track}
       </div>
       <div style="color:#666;font-size:0.8rem;margin-bottom:12px;">{run_date} &nbsp;·&nbsp; {run_time}</div>
       <table style="width:100%;border-collapse:collapse;font-size:0.92rem;">
         <tr>
-          <td style="color:#888;padding:3px 8px 3px 0;">Reaction</td>
-          <td style="color:#eee;text-align:right;">{slip.get('reaction_time') or '—'}</td>
-          <td style="width:24px;"></td>
-          <td style="color:#888;padding:3px 8px 3px 0;">Lane</td>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Lane</td>
           <td style="color:#eee;text-align:right;">{(slip.get('lane') or '—').title()}</td>
         </tr>
         <tr>
-          <td style="color:#888;padding:3px 8px 3px 0;">60 ft</td>
-          <td style="color:#eee;text-align:right;">{slip.get('ft_60') or '—'}</td>
-          <td></td>
-          <td style="color:#888;padding:3px 8px 3px 0;">Car #</td>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Car #</td>
           <td style="color:#eee;text-align:right;">{slip.get('car_number') or '—'}</td>
         </tr>
         <tr>
-          <td style="color:#888;padding:3px 8px 3px 0;">330 ft</td>
-          <td style="color:#eee;text-align:right;">{slip.get('ft_330') or '—'}</td>
-          <td></td>
-          <td style="color:#888;padding:3px 8px 3px 0;">Dial-In</td>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Dial-In</td>
           <td style="color:#eee;text-align:right;">{slip.get('dial_in') or '—'}</td>
         </tr>
         <tr>
-          <td style="color:#888;padding:3px 8px 3px 0;">660 ft</td>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">Reaction</td>
+          <td style="color:#eee;text-align:right;">{slip.get('reaction_time') or '—'}</td>
+        </tr>
+        <tr>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">60 ft</td>
+          <td style="color:#eee;text-align:right;">{slip.get('ft_60') or '—'}</td>
+        </tr>
+        <tr>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">330 ft</td>
+          <td style="color:#eee;text-align:right;">{slip.get('ft_330') or '—'}</td>
+        </tr>
+        <tr>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">660 ft</td>
           <td style="color:#eee;text-align:right;">{slip.get('ft_660') or '—'}</td>
-          <td></td>
-          <td style="color:#888;padding:3px 8px 3px 0;">660 MPH</td>
+        </tr>
+        <tr>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">660 MPH</td>
           <td style="color:#eee;text-align:right;">{slip.get('mph_660') or '—'}</td>
         </tr>
         <tr>
-          <td style="color:#888;padding:3px 8px 3px 0;">1000 ft</td>
+          <td style="color:#888;padding:2px 8px 2px 0;white-space:nowrap;">1000 ft</td>
           <td style="color:#eee;text-align:right;">{slip.get('ft_1000') or '—'}</td>
-          <td></td>
-          <td></td><td></td>
         </tr>
         <tr>
-          <td style="color:#cc1111;font-weight:700;padding:6px 8px 3px 0;">ET</td>
+          <td style="color:#cc1111;font-weight:700;padding:6px 8px 2px 0;white-space:nowrap;">ET</td>
           <td style="color:#cc1111;font-weight:700;font-size:1.2rem;text-align:right;">{slip.get('ft_1320') or '—'}</td>
-          <td></td>
-          <td style="color:#cc1111;font-weight:700;padding:6px 8px 3px 0;">MPH</td>
+        </tr>
+        <tr>
+          <td style="color:#cc1111;font-weight:700;padding:2px 8px 2px 0;white-space:nowrap;">MPH</td>
           <td style="color:#cc1111;font-weight:700;font-size:1.2rem;text-align:right;">{slip.get('mph_1320') or '—'}</td>
         </tr>
       </table>
@@ -2779,7 +2953,7 @@ def show_run_analysis(
         # ── Weather card
         _da_override = run.get("da_override")
         if wx or _da_override:
-            with right:
+            with _slot_weather:
                 wx = wx or {}
                 temp = wx.get("temperature_f")
                 hum = wx.get("humidity_pct")
@@ -2800,13 +2974,19 @@ def show_run_analysis(
                     _da_badge = (
                         ' <span style="background:rgba(255,165,0,0.18);color:#FFA500;'
                         'border:1px solid #FFA500;border-radius:4px;padding:1px 6px;'
-                        'font-size:0.68rem;font-weight:600;vertical-align:middle;">'
-                        '📋 Racer-documented</span>'
+                        'font-size:0.68rem;font-weight:600;vertical-align:middle;'
+                        'white-space:nowrap;">📋 Racer-documented</span>'
                     )
                     _wx_rows = ""
-                    da_note = "📋 DA entered manually in Run Details"
                 else:
-                    _da_badge = ""
+                    # Air-quality note as a contained badge beside the DA value —
+                    # same containment pattern as the Racer-documented badge.
+                    _da_badge = (
+                        f' <span style="color:{da_color};border:1px solid {da_color};'
+                        'border-radius:4px;padding:1px 6px;font-size:0.68rem;'
+                        'font-weight:600;vertical-align:middle;white-space:nowrap;">'
+                        f'{da_note}</span>'
+                    ) if da is not None else ""
                     _v_temp = f"{temp:.1f} °F"         if temp      is not None else "—"
                     _v_hum  = f"{hum:.0f}%"            if hum       is not None else "—"
                     _v_pres = f"{pres_inhg:.2f} inHg"  if pres_inhg is not None else "—"
@@ -2816,11 +2996,41 @@ def show_run_analysis(
                         f'<tr><td style="color:#888;padding:3px 0;">Barometric Pressure</td><td style="color:#eee;text-align:right;">{_v_pres}</td></tr>'
                     )
 
+                # Footer INSIDE the card border: override note, or the weather
+                # source attribution — never rendered as a loose caption that
+                # can collide with the card's edge.
+                _wx_source = "" if _da_override else wx.get("_source", "")
+                if _da_override:
+                    _wx_footer = (
+                        '<div style="color:#666;font-size:0.75rem;margin-top:8px;'
+                        'border-top:1px solid #2a0000;padding-top:6px;">'
+                        '📋 DA entered manually in Run Details</div>'
+                    )
+                elif _wx_source == "weatherkit":
+                    _wx_footer = (
+                        '<div style="color:#666;font-size:0.75rem;margin-top:8px;'
+                        'border-top:1px solid #2a0000;padding-top:6px;">'
+                        '✅ Weather data: Apple WeatherKit</div>'
+                    )
+                elif _wx_source == "open-meteo":
+                    _wx_footer = (
+                        '<div style="color:#666;font-size:0.72rem;margin-top:8px;'
+                        'border-top:1px solid #2a0000;padding-top:6px;line-height:1.5;">'
+                        'ℹ️ Weather data sourced from Open-Meteo historical archive. '
+                        'Runs within 10 days use Apple WeatherKit for precise conditions — '
+                        'older runs use regional model estimates which may vary from '
+                        'exact track conditions.</div>'
+                    )
+                else:
+                    _wx_footer = ""
+
                 # Single-line HTML string — a blank/whitespace line inside the
                 # markup (e.g. when _wx_rows is empty) would end the CommonMark
                 # HTML block and dump the rest as a raw code block.
                 _wx_card_html = (
-                    '<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;background:#0a0a0a;font-family:monospace;">'
+                    '<div style="overflow:hidden;border:1px solid #8b0000;'
+                    'border-radius:10px;padding:16px 20px;background:#0a0a0a;'
+                    'font-family:monospace;min-height:420px;margin-bottom:16px;">'
                     '<div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:4px;">🌤️ Weather at Run Time</div>'
                     f'<div style="color:#666;font-size:0.8rem;margin-bottom:12px;">{wx_date} &nbsp;·&nbsp; {wx_loc}</div>'
                     '<table style="width:100%;border-collapse:collapse;font-size:0.92rem;">'
@@ -2828,38 +3038,28 @@ def show_run_analysis(
                     f'<tr><td style="color:#cc1111;font-weight:700;padding:6px 0 3px;">Density Altitude{_da_badge}</td>'
                     f'<td style="color:{da_color};font-weight:700;font-size:1.1rem;text-align:right;">{da_str}</td></tr>'
                     '</table>'
-                    f'<div style="color:#666;font-size:0.75rem;margin-top:8px;">{da_note}</div>'
+                    f'{_wx_footer}'
                     '</div>'
                 )
                 st.markdown(_wx_card_html, unsafe_allow_html=True)
 
-            # Attribution in a new row below the card pair — right column only.
-            # Hidden when DA is racer-documented (API data isn't shown).
-            _wx_source = "" if _da_override else wx.get("_source", "")
-            if _wx_source:
-                _, _weather_caption_col = st.columns([1, 1])
-                with _weather_caption_col:
-                    if _wx_source == "weatherkit":
-                        st.caption("✅ Weather data: Apple WeatherKit")
-                    elif _wx_source == "open-meteo":
-                        st.caption("ℹ️ Weather data sourced from Open-Meteo historical archive. Runs within 10 days use Apple WeatherKit for precise conditions — older runs use regional model estimates which may vary from exact track conditions.")
-
-    # ── HP Calculator card ────────────────────────────────────────────────────────
+    # ── HP Calculator card — renders into _slot_rwhp, directly below Weather ──────
     if slip and weight_input:
         et_val = slip.get("ft_1320")
         mph_val = slip.get("mph_1320")
         hp = calc_rwhp(weight_input, et_val, mph_val)
 
         if hp:
-            st.markdown("### ⚡ Estimated Rear-Wheel Horsepower")
-            hp_cols = st.columns(len(hp))
-            labels = {
-                "from_mph": ("From Trap Speed", f"{mph_val} mph", "Most accurate"),
-                "from_et":  ("From ET",          f"{et_val}s",    "Good estimate"),
-            }
-            for col, (key, hp_val) in zip(hp_cols, hp.items()):
-                lbl, source, note = labels[key]
-                col.markdown(f"""
+            with _slot_rwhp:
+                st.markdown("### ⚡ Estimated Rear-Wheel Horsepower")
+                hp_cols = st.columns(len(hp))
+                labels = {
+                    "from_mph": ("From Trap Speed", f"{mph_val} mph", "Most accurate"),
+                    "from_et":  ("From ET",          f"{et_val}s",    "Good estimate"),
+                }
+                for col, (key, hp_val) in zip(hp_cols, hp.items()):
+                    lbl, source, note = labels[key]
+                    col.markdown(f"""
     <div style="
       border:1px solid #8b0000;
       border-radius:10px;
@@ -2876,15 +3076,13 @@ def show_run_analysis(
     </div>
     """, unsafe_allow_html=True)
 
-        st.markdown("---")
-
     elif slip and not weight_input:
-        st.info(
-            "Set **Weight with driver** in your Car Profile to see estimated "
-            "rear-wheel horsepower for this run.",
-            icon="⚡",
-        )
-        st.markdown("---")
+        with _slot_rwhp:
+            st.info(
+                "Set **Weight with driver** in your Car Profile to see estimated "
+                "rear-wheel horsepower for this run.",
+                icon="⚡",
+            )
 
     elif _slip_storage_key and not car_number_input.strip():
         st.info(
@@ -2914,6 +3112,14 @@ def show_run_analysis(
 
     # ── Channel charts (one chart per group, all channels overlaid) ───────────────
     if not _csv_available:
+        # Timeslip-only run: still show the scanned timeslip photo, then the
+        # AI Tuner at the very bottom (mirrors the CSV page order).
+        if _slip_bytes is not None:
+            with st.expander("📷 Timeslip photo", expanded=False):
+                st.image(correct_image_orientation(_slip_bytes), use_container_width=True)
+
+        st.markdown("---")
+        _render_ai_tuner_section()
         st.markdown(
             "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
             "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"
@@ -3311,6 +3517,10 @@ def show_run_analysis(
         with st.expander("📷 Timeslip photo", expanded=False):
             st.image(correct_image_orientation(_slip_bytes), use_container_width=True)
 
+    # AI Virtual Tuner — bottom of page, directly above Export all runs
+    st.markdown("---")
+    _render_ai_tuner_section()
+
     # ── Export all runs ───────────────────────────────────────────────────────────
     st.markdown("---")
 
@@ -3390,7 +3600,7 @@ def show_run_analysis(
     _export_cols = st.columns([1, 5])
     if _export_cols[0].button("⬇️ Export all runs to CSV"):
         import io, csv as _csv
-        _all_runs = listsaved_runs()
+        _all_runs = list_saved_runs()
         _rows = []
         for _r in _all_runs:
             _rec = _r["record"] or load_run(_r["filename"])

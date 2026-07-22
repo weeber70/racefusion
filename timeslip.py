@@ -69,6 +69,18 @@ Example: "8.341  >>WIN" means the right-lane car won.
 Cross-reference which lane the WIN marker applies to with the user's car lane to determine
 Win or Loss for car "{car_num}".
 
+FALLBACK — "1st" margin line (use ONLY when no WIN arrow or other explicit
+winner marker is printed): some tracks instead print a line near the bottom of
+the slip — after the MPH row, before the "Compulink AUTOSTART" line — in the
+form "<Lane> 1st <margin>", e.g.:
+  "Left 1st .7722"   → the LEFT-lane car crossed the finish line first
+  "Right 1st .0413"  → the RIGHT-lane car crossed the finish line first
+The named lane is the winner and the number is the winning margin in seconds
+(reaction time + ET compared between lanes). Cross-reference the named lane
+with the user's car lane: matching lane → "Win", opposite lane → "Loss".
+Do NOT confuse this line with round numbers, dial-ins, or timing splits — it
+always contains "1st" immediately after the lane word.
+
 Other timing systems: look for a printed "W" or "L", "WINNER"/"LOSER" text, a checked
 WIN/LOSS box, or a "BYE" label. Map winner → "Win", loser → "Loss", bye run → "Bye".
 If no result indicator is visible at all, use null."""
@@ -210,7 +222,15 @@ def _validate_timeslip(vals: dict) -> "list[dict]":
         })
 
     # 4. Reaction time range
-    if reaction is not None and (reaction < 0 or reaction > 1.0):
+    # Negative RT = red light (left before the green) — a valid, normal drag
+    # racing outcome, NOT a data-entry error. Only flag implausibly slow RTs.
+    if reaction is not None and reaction < 0:
+        warnings.append({
+            "field": "reaction_time",
+            "level": "info",
+            "message": f"Reaction time {reaction}s — red light (automatic loss)",
+        })
+    elif reaction is not None and reaction > 1.0:
         warnings.append({
             "field": "reaction_time",
             "level": "warning",
