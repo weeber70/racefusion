@@ -618,12 +618,44 @@ def fetch_weather_rdp(lat: float, lon: float, elev_ft: float = 0.0) -> dict:
         except Exception as _rdp_wk_err:
             print(f"[fetch_weather_rdp] WeatherKit error: {_rdp_wk_err}")
 
-    # Fallback: Open-Meteo forecast for today
-    from datetime import date as _d, datetime as _dtt
-    _today    = _d.today().strftime("%Y-%m-%d")
-    _cur_hour = _dtt.now().hour
-    result    = fetch_weather(lat, lon, _today, _cur_hour)
+    # Fallback: Open-Meteo forecast for "today, now" — in the TRACK'S local
+    # timezone, never the server's. (Streamlit Cloud runs in UTC: a naive
+    # now() picked the forecast hour 5h in the future during CDT, because
+    # fetch_weather indexes Open-Meteo's timezone=auto hourly array, which
+    # is labeled in track-local time.)
+    from datetime import datetime as _dtt, timezone as _tzu, timedelta as _tdl
+    _track_now = (_dtt.now(_tzu.utc)
+                  + _tdl(seconds=track_utc_offset_seconds(lat, lon)))
+    result = fetch_weather(lat, lon, _track_now.strftime("%Y-%m-%d"), _track_now.hour)
     return result
+
+
+def track_utc_offset_seconds(lat: float, lon: float) -> int:
+    """UTC offset (seconds) of the track's local timezone right now, resolved
+    via Open-Meteo's timezone lookup (handles DST and political boundaries —
+    no new dependencies). Cached per-coordinates in session state so it costs
+    one lightweight request per session. Returns 0 on failure (UTC), which
+    matches the old server-naive behavior in the worst case."""
+    try:
+        _key = f"_tz_off_{round(float(lat), 3)}_{round(float(lon), 3)}"
+    except (TypeError, ValueError):
+        return 0
+    cached = st.session_state.get(_key)
+    if cached is not None:
+        return cached
+    off = 0
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": lat, "longitude": lon,
+                    "current_weather": "true", "timezone": "auto"},
+            timeout=10,
+        )
+        off = int(r.json().get("utc_offset_seconds") or 0)
+    except Exception:
+        off = 0
+    st.session_state[_key] = off
+    return off
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

@@ -9,6 +9,7 @@ from weather import (
     calc_density_altitude, sea_level_to_station_pressure,
     station_to_sea_level_pressure, wind_dir_label,
     _TRACK_OVERRIDES, _track_key, lookup_track, geocode, fetch_weather_rdp, fetch_metar,
+    track_utc_offset_seconds,
 )
 
 
@@ -176,11 +177,17 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
         if st.session_state["rdp_weather"] is None:
             with st.spinner("Fetching current conditions…"):
                 try:
-                    from datetime import datetime as _rdp_dt
+                    from datetime import datetime as _rdp_dt, timezone as _rdp_tz, timedelta as _rdp_td
                     st.session_state["rdp_weather"] = fetch_weather_rdp(
                         float(_rdp_lat), float(_rdp_lon), _rdp_elev_ft
                     )
-                    st.session_state["rdp_weather_fetched_at"] = _rdp_dt.now().strftime("%-I:%M %p")
+                    # "Updated" caption in the TRACK's local time, not the
+                    # server clock (Streamlit Cloud runs in UTC — a naive
+                    # now() displayed a time 5h ahead during CDT).
+                    _rdp_track_now = _rdp_dt.now(_rdp_tz.utc) + _rdp_td(
+                        seconds=track_utc_offset_seconds(float(_rdp_lat), float(_rdp_lon))
+                    )
+                    st.session_state["rdp_weather_fetched_at"] = _rdp_track_now.strftime("%-I:%M %p")
                     st.session_state["rdp_weather_coords"]     = (_rdp_lat, _rdp_lon)
                     st.session_state["rdp_weather_elev_ft"]    = _rdp_elev_ft
                 except Exception as _rdp_wx_err:
