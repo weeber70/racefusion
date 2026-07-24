@@ -4,6 +4,7 @@ season_summary.py — RaceFusion Season Summary page.
 import streamlit as st
 from datetime import datetime
 from database import get_effective_da
+from timeslip import is_valid_reaction_time, best_reaction_time
 from weather import canonical_track, _auto_track_key, build_track_display_map
 from config import save_config
 
@@ -85,10 +86,8 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     _ssm_best_et  = min(_ssm_ets)  if _ssm_ets  else None
     _ssm_best_mph = max(_ssm_mphs) if _ssm_mphs else None
     _ssm_best_60  = min(_ssm_60s)  if _ssm_60s  else None
-    # Best Reaction: RT ≥ 0.000 only — negative RT is a red light (foul),
-    # never the "best" no matter how close to zero.
-    _ssm_pos_rts  = [v for v in _ssm_rts if v >= 0]
-    _ssm_best_rt  = min(_ssm_pos_rts) if _ssm_pos_rts else None
+    # Shared rule (timeslip.best_reaction_time): fouls never count as best
+    _ssm_best_rt  = best_reaction_time(_ssm_rts)
 
     _ssm_wins   = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Win")
     _ssm_losses = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Loss")
@@ -131,14 +130,13 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
         losses  = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Loss")
         byes    = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Bye")
         decided = wins + losses
-        # Best Reaction: RT ≥ 0.000 only — negative RT = red light, never "best"
-        pos_rts = [v for v in rts if v >= 0]
         return dict(
             n        = len(run_list),
             best_et  = min(ets)  if ets  else None,
             best_mph = max(mphs) if mphs else None,
             best_60  = min(s60s) if s60s else None,
-            best_rt  = min(pos_rts) if pos_rts else None,
+            # Shared rule (timeslip.best_reaction_time): fouls never count
+            best_rt  = best_reaction_time(rts),
             wins=wins, losses=losses, byes=byes, decided=decided,
             win_pct  = (wins / decided * 100) if decided > 0 else None,
         )
@@ -219,26 +217,27 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     _ssm_sorted = sorted(_ssm_runs, key=_ssm_sort_key)
 
     # Find best ET / reaction / 60ft indices for per-cell highlights
-    def _ssm_best_low_idx(key, min_value=None):
+    def _ssm_best_low_idx(key, validity=None):
         """Return the row index of the lowest non-null value for a slip field, or -1.
 
-        min_value: when set, values below it are ineligible — used to keep
-        negative reaction times (red lights / fouls) out of "Best Reaction".
+        validity: optional predicate — values failing it are ineligible. The
+        reaction-time rule comes from the ONE shared function
+        (timeslip.is_valid_reaction_time), never re-encoded here.
         """
         vals = []
         for _ri, _rr in enumerate(_ssm_sorted):
+            _raw = _rr["slip"].get(key)
             try:
-                _v = float(_rr["slip"].get(key))
+                _v = float(_raw)
             except (TypeError, ValueError):
                 continue
-            if min_value is not None and _v < min_value:
+            if validity is not None and not validity(_raw):
                 continue
             vals.append((_ri, _v))
         return min(vals, key=lambda x: x[1])[0] if vals else -1
 
     _ssm_best_et_idx  = _ssm_best_low_idx("ft_1320")
-    # RT ≥ 0.000 only — a negative RT is a foul, never the "best" reaction
-    _ssm_best_rt_idx  = _ssm_best_low_idx("reaction_time", min_value=0.0)
+    _ssm_best_rt_idx  = _ssm_best_low_idx("reaction_time", validity=is_valid_reaction_time)
     _ssm_best_60_idx  = _ssm_best_low_idx("ft_60")
 
     def _ssm_cell(val, fmt=None, zero_blank=False):

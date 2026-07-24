@@ -156,6 +156,32 @@ Return only the JSON object. No markdown, no explanation."""
     return json.loads(text)
 
 
+def is_valid_reaction_time(rt) -> bool:
+    """THE one rule for reaction-time validity, encoded once.
+
+    A reaction time below 0.000 is a red-light foul — illegal, never "best,"
+    never highlighted as the winning number anywhere in the app.
+    Non-numeric / missing values are also invalid.
+    """
+    try:
+        return float(rt) >= 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def best_reaction_time(rts):
+    """Best (lowest) VALID reaction time from an iterable, or None.
+
+    Fouls (negative) and non-numeric entries are excluded via
+    is_valid_reaction_time — the single shared rule.
+    """
+    vals = []
+    for v in rts:
+        if is_valid_reaction_time(v):
+            vals.append(float(v))
+    return min(vals) if vals else None
+
+
 def _normalize_slip_result(raw) -> str:
     """Map any scanner result value to 'Win', 'Loss', 'Bye', or '' (unknown/null)."""
     if not raw:

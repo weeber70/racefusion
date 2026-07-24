@@ -14,6 +14,7 @@ from database import (
 )
 from run_analysis import load_racepak_csv, get_time_col
 from config import load_config
+from timeslip import is_valid_reaction_time
 from charts import make_overlay_chart
 
 # ── Channel groups (mirrors CHANNEL_GROUPS in app.py) ────────────────────────
@@ -484,15 +485,23 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
         rows = []
         slips = [rec.get("timeslip", {}) for _, rec in records]
 
-        def _row(label, key, fmt, lower_better=True):
+        def _row(label, key, fmt, lower_better=True, validity=None):
+            """validity: optional predicate — values failing it still DISPLAY
+            but are excluded from best/worst coloring (a red-light foul must
+            never show green as the 'winning' reaction)."""
             vals_raw = [s.get(key) for s in slips]
             vals_str = [_fmt(v, fmt) for v in vals_raw]
             nums     = []
             for v in vals_raw:
                 try:
-                    nums.append(float(v))
+                    _n = float(v)
                 except (TypeError, ValueError):
                     nums.append(None)
+                    continue
+                if validity is not None and not validity(v):
+                    nums.append(None)      # ineligible for best/worst
+                    continue
+                nums.append(_n)
             colors = _best_worst_colors(nums, lower_better=lower_better)
             return (label, vals_str, colors)
 
@@ -509,7 +518,10 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
                     nums.append(None)
             return (vals_str, _best_worst_colors(nums, lower_better=True))
 
-        rows.append(_row("Reaction",    "reaction_time", "{:.3f}", lower_better=True))
+        # Reaction: shared foul rule (timeslip.is_valid_reaction_time) — a
+        # negative RT displays but can never be colored as best or worst.
+        rows.append(_row("Reaction",    "reaction_time", "{:.3f}", lower_better=True,
+                         validity=is_valid_reaction_time))
         rows.append(_row("60'",         "ft_60",         "{:.3f}", lower_better=True))
         rows.append(_row("330'",        "ft_330",        "{:.3f}", lower_better=True))
         rows.append(_row("660'",        "ft_660",        "{:.3f}", lower_better=True))
