@@ -34,7 +34,7 @@ from config import load_config, save_config
 from weather import (
     fetch_weather, fetch_metar, lookup_track, geocode,
     calc_density_altitude, sea_level_to_station_pressure, wind_dir_label,
-    _TRACK_OVERRIDES, _track_key,
+    _TRACK_OVERRIDES, _track_key, canonical_track,
 )
 from charts import (
     make_overlay_chart, TRACE_COLORS, RPM_CHANNEL_NAMES,
@@ -2196,6 +2196,73 @@ def show_run_analysis(
                     "notes":         p_rd.get("notes", ""),
                 })
 
+            # ── All-time records (COMPUTED — never model-estimated) ──────────────────
+            # Mirrors Season Summary's "All-Time Best Stats" card exactly: same
+            # run list, same timeslip fields (ft_60 / ft_1320 / mph_1320), same
+            # min/max aggregation over floats — the two can never disagree.
+            # Includes the run being analyzed, like the card does.
+            _rec_label_by_fn = {p["filename"]: p["label"] for p in prev_runs}
+            _rec_label_by_fn[csv_name] = "the run being analyzed"
+
+            _rec_all_entries = []
+            for _rec_saved in allsaved_runs:
+                _rec_slip = (_rec_saved.get("record") or {}).get("timeslip") or {}
+                _rec_all_entries.append((_rec_saved["filename"], _rec_slip))
+
+            def _rec_best(entries, key, use_max=False, with_track=False):
+                best = None
+                for _rb_fn, _rb_s in entries:
+                    try:
+                        _rb_v = float(_rb_s.get(key))
+                    except (TypeError, ValueError):
+                        continue
+                    if best is None or (_rb_v > best[0] if use_max else _rb_v < best[0]):
+                        best = (_rb_v, _rb_fn, _rb_s)
+                if best is None:
+                    return None
+                _rb_v, _rb_fn, _rb_s = best
+                out = {"value": _rb_v,
+                       "run":   _rec_label_by_fn.get(_rb_fn, _rb_fn),
+                       "date":  _rb_s.get("date") or ""}
+                if with_track:
+                    out["track"] = (_rb_s.get("track_name")
+                                    or _rb_s.get("track_location") or "")
+                return out
+
+            # Per-track grouping uses the same canonical-track identity as the
+            # rest of the app (merges "Gainesville" / "Auto Plus" style aliases)
+            _rec_aliases = car_cfg.get("track_aliases", {}) or {}
+            _rec_by_track: dict = {}
+            for _rec_fn, _rec_s in _rec_all_entries:
+                _rec_raw_t = (_rec_s.get("track_name")
+                              or _rec_s.get("track_location") or "").strip()
+                if not _rec_raw_t:
+                    continue
+                _rec_disp = canonical_track(_rec_raw_t, _rec_aliases)[1]
+                _rec_by_track.setdefault(_rec_disp, []).append((_rec_fn, _rec_s))
+
+            all_time_records = {
+                "_note": ("COMPUTED by RaceFusion over the driver's complete run "
+                          "history (all seasons, all tracks, including the run "
+                          "being analyzed). Any record/best claim MUST quote "
+                          "these values — never estimate records by scanning "
+                          "previous_runs."),
+                "all_time": {
+                    "best_60ft": _rec_best(_rec_all_entries, "ft_60", with_track=True),
+                    "best_et":   _rec_best(_rec_all_entries, "ft_1320", with_track=True),
+                    "best_mph":  _rec_best(_rec_all_entries, "mph_1320",
+                                           use_max=True, with_track=True),
+                },
+                "per_track": {
+                    _rt: {
+                        "best_60ft": _rec_best(_re, "ft_60"),
+                        "best_et":   _rec_best(_re, "ft_1320"),
+                        "best_mph":  _rec_best(_re, "mph_1320", use_max=True),
+                    }
+                    for _rt, _re in sorted(_rec_by_track.items())
+                },
+            }
+
             # ── Car profile ───────────────────────────────────────────────────────────
             # Source priority:
             #   1. run_data['car_snapshot'] — config as it was when the run was made
@@ -2299,6 +2366,7 @@ def show_run_analysis(
                     "changelog":     run_rec.get("changelog", []),
                     "notes":         rd.get("notes", ""),
                 },
+                "all_time_records": all_time_records,
                 "previous_runs": prev_runs,
             }
             return _json.dumps(payload, indent=2, default=str)
@@ -2338,6 +2406,9 @@ def show_run_analysis(
         Compare this run against every previous run using raw ET, 60ft, and MPH — do not compute or reference corrected ET. \
         Note the DA for each run to give context (lower DA = better air = naturally faster). \
         Use the run label field (e.g. "Run 1", "Run 2") to identify each run — never use raw filenames or timestamps. \
+        For any RECORD claim ("your best is X", "you've run X–Y", personal bests, all-time or per-track bests): \
+        quote the value from the all_time_records block — do NOT calculate, estimate, or summarize records by scanning \
+        the previous_runs list yourself. The previous_runs list is for comparison and trend narrative only. \
         If no previous runs exist, say so and move on.
 
         ## Changelog Impact
@@ -2376,6 +2447,12 @@ def show_run_analysis(
         ---
 
         ABSOLUTE RULES:
+
+        RECORD CLAIMS — the all_time_records block is the ONLY source for any "best" or record statement: \
+        all-time or per-track best 60ft, best ET, best MPH. These are pre-computed by RaceFusion over the driver's \
+        complete history and always correct. Never derive a record by scanning previous_runs — with dozens of runs \
+        you will miss entries. If a value is absent from all_time_records, say the record is unavailable rather than \
+        estimating one.
 
         EGT DIRECTION — memorize this and never reverse it:
         HIGH EGT (hot cylinder) = LEAN = not enough fuel. LOW EGT (cold cylinder) = RICH or misfiring. \
