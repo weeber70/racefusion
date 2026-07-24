@@ -85,7 +85,10 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
     _ssm_best_et  = min(_ssm_ets)  if _ssm_ets  else None
     _ssm_best_mph = max(_ssm_mphs) if _ssm_mphs else None
     _ssm_best_60  = min(_ssm_60s)  if _ssm_60s  else None
-    _ssm_best_rt  = min(_ssm_rts)  if _ssm_rts  else None
+    # Best Reaction: RT ≥ 0.000 only — negative RT is a red light (foul),
+    # never the "best" no matter how close to zero.
+    _ssm_pos_rts  = [v for v in _ssm_rts if v >= 0]
+    _ssm_best_rt  = min(_ssm_pos_rts) if _ssm_pos_rts else None
 
     _ssm_wins   = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Win")
     _ssm_losses = sum(1 for r in _ssm_runs if r["rec"].get("run_details", {}).get("result") == "Loss")
@@ -128,12 +131,14 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
         losses  = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Loss")
         byes    = sum(1 for r in run_list if r["rec"].get("run_details", {}).get("result") == "Bye")
         decided = wins + losses
+        # Best Reaction: RT ≥ 0.000 only — negative RT = red light, never "best"
+        pos_rts = [v for v in rts if v >= 0]
         return dict(
             n        = len(run_list),
             best_et  = min(ets)  if ets  else None,
             best_mph = max(mphs) if mphs else None,
             best_60  = min(s60s) if s60s else None,
-            best_rt  = min(rts)  if rts  else None,
+            best_rt  = min(pos_rts) if pos_rts else None,
             wins=wins, losses=losses, byes=byes, decided=decided,
             win_pct  = (wins / decided * 100) if decided > 0 else None,
         )
@@ -391,9 +396,22 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
             f'</tr>'
         )
 
-    st.markdown(f"""
-<div style="border:1px solid #8b0000;border-radius:10px;padding:16px 20px;
-  background:#0a0a0a;font-family:monospace;">
+    # ── Runs by Track — Streamlit bordered container so the merge tool
+    # renders INSIDE the card boundary (a Streamlit expander cannot live
+    # inside a raw HTML div, so the whole card becomes a real container).
+    # Keyed so CSS restyles the border to the brand red used by other cards.
+    st.markdown(
+        "<style>"
+        "div[class*='st-key-ssm_track_card'] > div[data-testid='stVerticalBlockBorderWrapper'],"
+        "div[data-testid='stVerticalBlockBorderWrapper']:has(div[class*='st-key-ssm_track_card'])"
+        "{border:1px solid #8b0000 !important;border-radius:10px !important;"
+        "background:#0a0a0a !important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True, key="ssm_track_card"):
+        st.markdown(f"""
+<div style="padding:2px 4px;font-family:monospace;">
   <div style="font-size:1.1rem;font-weight:700;color:#cc1111;margin-bottom:10px;
     border-bottom:1px solid #2a0000;padding-bottom:6px;">
     🏟️ Runs by Track
@@ -410,58 +428,58 @@ def show_season_summary(saved_runs: list, cfg: dict, logo_src: "str | None" = No
   </table>
 </div>""", unsafe_allow_html=True)
 
-    # ── Track merge tool ──────────────────────────────────────────────────────
-    with st.expander("🔀 Merge duplicate tracks"):
-        st.caption(
-            "Merge two track entries that are the same physical venue "
-            "(e.g. \"Lucas Oil Raceway Park\" and \"Lucas Oil Raceway Park At "
-            "Indianapolis\"). Merging only changes how runs are grouped and "
-            "labelled — the raw text on each run's timeslip is never modified."
-        )
-        _ssm_all_tracks = sorted(
-            {v["name"] for v in _ssm_track_map.values() if v["name"] != "Unknown"}
-        )
-        _mg_c1, _mg_c2 = st.columns(2)
-        _merge_src = _mg_c1.selectbox(
-            "Merge this track…", [""] + _ssm_all_tracks, key="ssm_merge_src"
-        )
-        _merge_dst = _mg_c2.selectbox(
-            "…into this track", [""] + _ssm_all_tracks, key="ssm_merge_dst"
-        )
-        _merge_ok = bool(
-            _merge_src and _merge_dst
-            and _auto_track_key(_merge_src) != _auto_track_key(_merge_dst)
-        )
-        if st.button("🔀 Merge tracks", key="ssm_merge_btn", type="primary",
-                     disabled=not _merge_ok):
-            _aliases = cfg.get("track_aliases", {}) or {}
-            _aliases[_auto_track_key(_merge_src)] = _merge_dst
-            # Re-point any existing merges that targeted the source track so
-            # chains always resolve in a single hop.
-            for _ak, _av in list(_aliases.items()):
-                if _auto_track_key(_av) == _auto_track_key(_merge_src):
-                    _aliases[_ak] = _merge_dst
-            cfg["track_aliases"] = _aliases
-            save_config(cfg)
-            st.success(f"Merged \"{_merge_src}\" into \"{_merge_dst}\".")
-            st.rerun()
+        # ── Track merge tool (inside the card border) ─────────────────────────
+        with st.expander("🔀 Merge duplicate tracks"):
+            st.caption(
+                "Merge two track entries that are the same physical venue "
+                "(e.g. \"Lucas Oil Raceway Park\" and \"Lucas Oil Raceway Park At "
+                "Indianapolis\"). Merging only changes how runs are grouped and "
+                "labelled — the raw text on each run's timeslip is never modified."
+            )
+            _ssm_all_tracks = sorted(
+                {v["name"] for v in _ssm_track_map.values() if v["name"] != "Unknown"}
+            )
+            _mg_c1, _mg_c2 = st.columns(2)
+            _merge_src = _mg_c1.selectbox(
+                "Merge this track…", [""] + _ssm_all_tracks, key="ssm_merge_src"
+            )
+            _merge_dst = _mg_c2.selectbox(
+                "…into this track", [""] + _ssm_all_tracks, key="ssm_merge_dst"
+            )
+            _merge_ok = bool(
+                _merge_src and _merge_dst
+                and _auto_track_key(_merge_src) != _auto_track_key(_merge_dst)
+            )
+            if st.button("🔀 Merge tracks", key="ssm_merge_btn", type="primary",
+                         disabled=not _merge_ok):
+                _aliases = cfg.get("track_aliases", {}) or {}
+                _aliases[_auto_track_key(_merge_src)] = _merge_dst
+                # Re-point any existing merges that targeted the source track so
+                # chains always resolve in a single hop.
+                for _ak, _av in list(_aliases.items()):
+                    if _auto_track_key(_av) == _auto_track_key(_merge_src):
+                        _aliases[_ak] = _merge_dst
+                cfg["track_aliases"] = _aliases
+                save_config(cfg)
+                st.success(f"Merged \"{_merge_src}\" into \"{_merge_dst}\".")
+                st.rerun()
 
-        _ssm_active_aliases = cfg.get("track_aliases", {}) or {}
-        if _ssm_active_aliases:
-            st.markdown("**Active merges:**")
-            for _ak in sorted(_ssm_active_aliases):
-                _av = _ssm_active_aliases[_ak]
-                _un_c1, _un_c2 = st.columns([5, 1])
-                _un_c1.markdown(
-                    f"<span style='color:#888;'>{_ak.title()}</span> → "
-                    f"<strong>{_av}</strong>",
-                    unsafe_allow_html=True,
-                )
-                if _un_c2.button("Undo", key=f"ssm_unmerge_{_ak}"):
-                    _ssm_active_aliases.pop(_ak, None)
-                    cfg["track_aliases"] = _ssm_active_aliases
-                    save_config(cfg)
-                    st.rerun()
+            _ssm_active_aliases = cfg.get("track_aliases", {}) or {}
+            if _ssm_active_aliases:
+                st.markdown("**Active merges:**")
+                for _ak in sorted(_ssm_active_aliases):
+                    _av = _ssm_active_aliases[_ak]
+                    _un_c1, _un_c2 = st.columns([5, 1])
+                    _un_c1.markdown(
+                        f"<span style='color:#888;'>{_ak.title()}</span> → "
+                        f"<strong>{_av}</strong>",
+                        unsafe_allow_html=True,
+                    )
+                    if _un_c2.button("Undo", key=f"ssm_unmerge_{_ak}"):
+                        _ssm_active_aliases.pop(_ak, None)
+                        cfg["track_aliases"] = _ssm_active_aliases
+                        save_config(cfg)
+                        st.rerun()
 
     st.markdown(
         "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
