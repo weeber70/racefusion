@@ -486,23 +486,39 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
         slips = [rec.get("timeslip", {}) for _, rec in records]
 
         def _row(label, key, fmt, lower_better=True, validity=None):
-            """validity: optional predicate — values failing it still DISPLAY
-            but are excluded from best/worst coloring (a red-light foul must
-            never show green as the 'winning' reaction)."""
+            """validity: optional predicate encoding head-to-head rules for
+            fouls (e.g. is_valid_reaction_time):
+              • invalid values can never be colored as 'best'
+              • an invalid value ALWAYS loses to any legal value — the foul
+                shows red, the legal side wins green (basic drag racing rules)
+              • all-invalid: nothing to rank, everything uncolored
+            """
             vals_raw = [s.get(key) for s in slips]
             vals_str = [_fmt(v, fmt) for v in vals_raw]
-            nums     = []
+            nums, fouls = [], []
             for v in vals_raw:
                 try:
                     _n = float(v)
                 except (TypeError, ValueError):
                     nums.append(None)
+                    fouls.append(False)
                     continue
                 if validity is not None and not validity(v):
-                    nums.append(None)      # ineligible for best/worst
+                    nums.append(None)      # ineligible for best ranking
+                    fouls.append(True)     # …but an automatic head-to-head loser
                     continue
                 nums.append(_n)
+                fouls.append(False)
             colors = _best_worst_colors(nums, lower_better=lower_better)
+            _valid_count = sum(1 for _n in nums if _n is not None)
+            if any(fouls) and _valid_count >= 1:
+                # A foul always loses to any legal value → color it as loser
+                colors = [(_C_WORST if _f else _c) for _c, _f in zip(colors, fouls)]
+                if _valid_count == 1:
+                    # The lone legal value won the head-to-head → winner green
+                    # (base coloring can't rank a single valid value alone)
+                    colors = [(_C_BEST if (_n is not None and not _f) else _c)
+                              for _c, _n, _f in zip(colors, nums, fouls)]
             return (label, vals_str, colors)
 
         # DA: shared helper — da_override wins, else recompute from raw weather
