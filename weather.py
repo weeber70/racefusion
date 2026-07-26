@@ -417,7 +417,18 @@ def fetch_weather(lat: float, lon: float, date_str: str, hour: int = 12) -> dict
     # ── WeatherKit path (recent runs ≤ 10 days) ───────────────────────────────
     if token is not None:
         try:
-            target       = _dt(run_date.year, run_date.month, run_date.day, hour, 0, 0, tzinfo=_tz.utc)
+            # `hour` is the timeslip's TRACK-LOCAL hour, but WeatherKit reads
+            # hourlyStart as UTC. Convert local → true UTC using the track's
+            # timezone offset (same helper as the Race Day Predictor fix).
+            # Example: 11:00 CDT (offset −18000s) → 16:00Z, not 11:00Z.
+            # The helper resolves the offset for "now"; since this branch only
+            # serves runs ≤10 days old, the sole edge case is a DST transition
+            # inside that window (off by 1h, vs 5–6h with the old bug). On
+            # lookup failure it returns 0, degrading to the old behavior
+            # instead of crashing.
+            _tz_off      = track_utc_offset_seconds(lat, lon)
+            _local       = _dt(run_date.year, run_date.month, run_date.day, hour, 0, 0, tzinfo=_tz.utc)
+            target       = _local - _td(seconds=_tz_off)
             hourly_start = target.strftime("%Y-%m-%dT%H:%M:%SZ")
             hourly_end   = (target + _td(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
             r = requests.get(
