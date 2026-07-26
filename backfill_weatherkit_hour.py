@@ -25,17 +25,10 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def _load_dotenv() -> None:
-    """Minimal .env reader (read-only; env vars already set take precedence)."""
-    path = os.path.join(_ROOT, ".env")
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    """Load .env the same way the app does (python-dotenv handles the
+    multi-line APPLE_PRIVATE_KEY PEM, which a naive line parser cannot)."""
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_ROOT, ".env"))
 
 
 _load_dotenv()
@@ -50,7 +43,7 @@ st.session_state = {}  # type: ignore[assignment]
 
 from database import _sb  # noqa: E402
 from weather import fetch_weather, lookup_track, calc_density_altitude, \
-    track_utc_offset_seconds  # noqa: E402
+    track_utc_offset_seconds, _get_weatherkit_token  # noqa: E402
 
 
 def _hpa_to_inhg(hpa):
@@ -77,6 +70,25 @@ def main() -> int:
     if _sb is None:
         print("ERROR: Supabase client not configured (SUPABASE_URL / "
               "SUPABASE_SERVICE_KEY missing). Run from the repo root with .env present.")
+        return 1
+
+    # Loud source check — never let a silent WeatherKit fallback slip by again.
+    if _get_weatherkit_token() is not None:
+        print("WeatherKit credentials: OK — recent runs (≤10 days old) will "
+              "re-fetch from Apple WeatherKit.\n")
+    else:
+        missing = [k for k in ("APPLE_TEAM_ID", "APPLE_SERVICE_ID",
+                               "APPLE_KEY_ID", "APPLE_PRIVATE_KEY")
+                   if not os.getenv(k)]
+        print("⚠️  WeatherKit credentials NOT usable — every re-fetch would "
+              "fall back to Open-Meteo.")
+        if missing:
+            print(f"   Missing from environment: {', '.join(missing)}")
+        else:
+            print("   All four APPLE_* vars present — the private key likely "
+                  "failed to parse/sign (check PEM formatting in .env).")
+        print("   Aborting so we don't backfill from the wrong source. "
+              "Fix .env and re-run.")
         return 1
 
     rows = (_sb.table("runs")
@@ -125,7 +137,12 @@ def main() -> int:
             skipped += 1
             continue
 
-        da_new = calc_density_altitude(new.get("temperature_f"), new.get("pressure_hpa"))
+        # Humidity-inclusive DA — matches get_effective_da / what the app
+        # displays (the motorsports-standard formula, verified within 8 ft of
+        # airdensityonline given identical inputs).
+        da_new = calc_density_altitude(new.get("temperature_f"),
+                                       new.get("pressure_hpa"),
+                                       new.get("humidity_pct"))
         if da_new is not None:
             new["density_alt_ft"] = round(da_new)
 
