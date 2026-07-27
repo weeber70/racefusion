@@ -486,13 +486,25 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                             _rdp_conf_detail = f"— based on {_rdp_n_fit} runs"
                             _rdp_conf_color  = "#22aa55"
 
-                        _rp1, _rp2 = st.columns(2)
-                        _rp1.metric(f"Predicted ET ({_rdp_dist_lbl})", f"{_rdp_pred_et:.3f} s")
-                        _rp2.metric(
-                            "DA Used",
-                            f"{_rdp_pred_da:,.0f} ft",
-                            help="From your weather station" if _rdp_manual_active else "From METAR / forecast",
-                        )
+                        # Keyed container so the centering CSS is scoped to
+                        # these two metrics only (weather metrics untouched).
+                        with st.container(key="rdp_pred_metrics"):
+                            st.markdown(
+                                "<style>"
+                                ".st-key-rdp_pred_metrics [data-testid='stMetric'] {text-align:center;}"
+                                ".st-key-rdp_pred_metrics [data-testid='stMetricLabel'] {display:flex;justify-content:center;}"
+                                ".st-key-rdp_pred_metrics [data-testid='stMetricValue'] {display:flex;justify-content:center;}"
+                                ".st-key-rdp_pred_metrics [data-testid='stMetricDelta'] {justify-content:center;}"
+                                "</style>",
+                                unsafe_allow_html=True,
+                            )
+                            _rp1, _rp2 = st.columns(2)
+                            _rp1.metric(f"Predicted ET ({_rdp_dist_lbl})", f"{_rdp_pred_et:.3f} s")
+                            _rp2.metric(
+                                "DA Used",
+                                f"{_rdp_pred_da:,.0f} ft",
+                                help="From your weather station" if _rdp_manual_active else "From METAR / forecast",
+                            )
                         if _rdp_miss_660 > 0:
                             st.markdown(
                                 f"<p style='color:#888;font-size:0.82rem;margin-top:2px;'>"
