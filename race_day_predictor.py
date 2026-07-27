@@ -366,6 +366,7 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                         _rdp_extra[_rex_fn] = {
                             "run_type": _rex_rt,
                             "mph":      _rex_slip.get("mph_1320"),
+                            "mph_660":  _rex_slip.get("mph_660"),
                             "time":     _rex_slip.get("time") or "",
                         }
                 except Exception as _rdp_extra_err:
@@ -374,6 +375,7 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                 _rx = _rdp_extra.get(_r.get("csv_filename", ""), {})
                 _r["run_type"] = _rx.get("run_type", "")
                 _r["mph"]      = _rx.get("mph")
+                _r["mph_660"]  = _rx.get("mph_660")
                 _r["time"]     = _rx.get("time", "")
 
             if not _rdp_history:
@@ -558,11 +560,17 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
 
                 _rdp_col_w = [1, 2, 3, 2, 2, 2, 2, 3]
 
+                # ET/MPH columns follow the ¼/⅛ toggle so the table shows the
+                # data actually feeding the currently-selected regression.
+                _rdp_et_hdr  = "ET (⅛ mi)"  if _rdp_is_eighth else "ET (¼ mi)"
+                _rdp_mph_hdr = "MPH (660′)" if _rdp_is_eighth else "MPH (trap)"
+
                 def _rdp_render_header():
                     _rdp_hdr = st.columns(_rdp_col_w)
                     for _hcol, _hlbl in zip(
                         _rdp_hdr,
-                        ["Include", "Date", "Track", "Run Type", "ET", "MPH", "DA ft", "Status"],
+                        ["Include", "Date", "Track", "Run Type",
+                         _rdp_et_hdr, _rdp_mph_hdr, "DA ft", "Status"],
                     ):
                         _hcol.markdown(
                             f"<span style='font-size:0.75em;color:#888;"
@@ -634,8 +642,15 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                             _rdp_cols[1].write(_rdp_date_disp)
                             _rdp_cols[2].write(_rdp_row.get("track") or "—")
                             _rdp_cols[3].write(_rdp_row.get("run_type") or "—")
-                            _rdp_cols[4].write(f"{_rdp_row['et']:.3f}")
-                            _rdp_mph = _rdp_row.get("mph")
+                            if _rdp_is_eighth:
+                                _rdp_et_disp = _rdp_row.get("et_660")
+                                _rdp_mph     = _rdp_row.get("mph_660")
+                            else:
+                                _rdp_et_disp = _rdp_row.get("et")
+                                _rdp_mph     = _rdp_row.get("mph")
+                            _rdp_cols[4].write(
+                                f"{float(_rdp_et_disp):.3f}" if _rdp_et_disp else "—"
+                            )
                             _rdp_cols[5].write(f"{float(_rdp_mph):.2f}" if _rdp_mph else "—")
                             _rdp_cols[6].write(f"{int(round(_rdp_row['da'])):,}")
                             _rdp_cols[7].markdown(_status_html, unsafe_allow_html=True)
