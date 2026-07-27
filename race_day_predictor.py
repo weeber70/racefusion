@@ -473,6 +473,32 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                             f"</div>",
                             unsafe_allow_html=True,
                         )
+
+                        # ── Extrapolation warning ─────────────────────────────
+                        # Distinct from the R²/confidence messaging: fires when
+                        # today's DA falls outside the DA range of the runs the
+                        # regression was actually fit on. Display only — the
+                        # model itself is unchanged (no clamping/dampening).
+                        _rdp_da_min = min(_rdp_xs)
+                        _rdp_da_max = max(_rdp_xs)
+                        if not (_rdp_da_min <= _rdp_pred_da <= _rdp_da_max):
+                            _rdp_ext_above = _rdp_pred_da > _rdp_da_max
+                            _rdp_ext_dir   = "above" if _rdp_ext_above else "below"
+                            _rdp_ext_dist  = (_rdp_pred_da - _rdp_da_max) if _rdp_ext_above \
+                                             else (_rdp_da_min - _rdp_pred_da)
+                            st.markdown(
+                                f"<div style='background:rgba(204,136,0,0.12);"
+                                f"border:1px solid #cc8800;border-radius:8px;"
+                                f"padding:10px 14px;margin-top:10px;"
+                                f"font-size:0.88rem;color:#e0a020;'>"
+                                f"⚠️ Today's DA ({_rdp_pred_da:,.0f} ft) is "
+                                f"{_rdp_ext_dir} every included run "
+                                f"({_rdp_da_min:,.0f}–{_rdp_da_max:,.0f} ft) — "
+                                f"prediction is extrapolated {_rdp_ext_dist:,.0f} ft "
+                                f"beyond your logged data."
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
                         if _rdp_excluded:
                             st.markdown(
                                 f"<p style='color:#888;font-size:0.82rem;margin-top:12px;'>"
