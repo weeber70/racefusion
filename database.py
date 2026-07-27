@@ -685,12 +685,20 @@ def _rdp_load_run_history(username: str) -> list[dict]:
         da = get_effective_da(rec)
         if da is None:
             continue
+        # 1/8-mile ET — present on most timeslips but NOT guaranteed; None when
+        # missing so the predictor can drop the run from the 660' regression
+        # only (the run still counts for the 1/4-mile fit).
+        try:
+            et_660 = float(slip.get("ft_660") or 0)
+        except (TypeError, ValueError):
+            et_660 = 0.0
         results.append({
             "run_id":            str(row.get("id", "")),
             "csv_filename":      row.get("csv_filename", ""),
             "date":              slip.get("date") or row.get("created_at", "")[:10],
             "track":             slip.get("track_name") or slip.get("track_location") or "—",
             "et":                 et,
+            "et_660":             et_660 if et_660 > 0 else None,
             "da":                 float(da),
             "predictor_exclude":  rec.get("predictor_exclude"),  # None / True / False
         })

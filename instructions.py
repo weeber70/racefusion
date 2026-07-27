@@ -127,7 +127,7 @@ The Race Day Predictor estimates your ET for today's conditions based on your ru
 
 **Including / Excluding Runs** — In the run history table, each run has an Include/Exclude toggle. Use this to remove runs from a day with unusual conditions (wet track, mechanical issue, tune experiment) without deleting them. The model only uses included runs.
 
-**Dial-in suggestion** — The predictor shows a suggested dial-in based on the predicted ET. Adjust your actual dial-in based on track conditions, driver confidence, and how well the prediction has been tracking lately.
+**¼ / ⅛ mile toggle** — The predictor can target either quarter-mile (1320′) or eighth-mile (660′) ET; pick the distance with the toggle above the prediction. Runs missing a 660′ time are skipped by the ⅛-mile fit only. Set your dial-in from the predicted ET using your own judgment — RaceFusion no longer adds a padding buffer for you.
 """)
     st.markdown("---")
 

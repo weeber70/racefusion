@@ -60,7 +60,7 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
         st.markdown("## 🏁 RaceFusion")
     st.markdown("# 🏁 Race Day Predictor")
     st.markdown(
-        "<p style='color:#888;margin-top:-12px;'>Predicted ET and suggested dial based on your car's history + today's air.</p>",
+        "<p style='color:#888;margin-top:-12px;'>Predicted ET (¼ or ⅛ mile) based on your car's history + today's air.</p>",
         unsafe_allow_html=True,
     )
     st.markdown("---")
@@ -430,11 +430,39 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                         _rdp_excluded.append({**_rdp_r, "status": _rdp_status})
 
                 _rdp_n_incl = len(_rdp_included)
+
+                # ── Distance toggle: ¼ mile vs ⅛ mile ─────────────────────────
+                # One view at a time. Same included run set and same regression
+                # approach; the ⅛-mile fit simply targets 660' ET, dropping
+                # (from the fit only) any included run missing 660' data.
+                _rdp_dist_choice = st.radio(
+                    "Prediction distance",
+                    ["¼ mile (1320′)", "⅛ mile (660′)"],
+                    horizontal=True, key="rdp_distance_mode",
+                    label_visibility="collapsed",
+                )
+                _rdp_is_eighth = _rdp_dist_choice.startswith("⅛")
+                _rdp_dist_lbl  = "⅛ mile" if _rdp_is_eighth else "¼ mile"
+
+                if _rdp_is_eighth:
+                    _rdp_pairs = [(r["da"], r["et_660"]) for r in _rdp_included
+                                  if r.get("et_660") is not None]
+                else:
+                    _rdp_pairs = [(r["da"], r["et"]) for r in _rdp_included]
+                _rdp_n_fit    = len(_rdp_pairs)
+                _rdp_miss_660 = _rdp_n_incl - _rdp_n_fit  # 0 in ¼-mile mode
+
                 if _rdp_n_incl < 2:
                     st.warning("Not enough clean runs for regression (need at least 2 after outlier removal).")
+                elif _rdp_n_fit < 2:
+                    st.warning(
+                        f"Not enough runs with 660′ data for a ⅛-mile regression — "
+                        f"only {_rdp_n_fit} of {_rdp_n_incl} included run(s) have a 660′ ET "
+                        f"(need at least 2). Switch to ¼ mile or log runs with 660′ times."
+                    )
                 else:
-                    _rdp_xs = [r["da"] for r in _rdp_included]
-                    _rdp_ys = [r["et"] for r in _rdp_included]
+                    _rdp_xs = [p[0] for p in _rdp_pairs]
+                    _rdp_ys = [p[1] for p in _rdp_pairs]
                     _rdp_slope, _rdp_intercept = _rdp_linear_regression(_rdp_xs, _rdp_ys)
 
                     if _rdp_slope is None:
@@ -442,29 +470,34 @@ def show_race_day_predictor(cfg: dict, current_user: str, access_granted: bool, 
                     else:
                         _rdp_r2       = _rdp_r_squared(_rdp_xs, _rdp_ys, _rdp_slope, _rdp_intercept)
                         _rdp_pred_et  = _rdp_slope * _rdp_pred_da + _rdp_intercept
-                        _rdp_dial     = _rdp_pred_et + 0.02
 
-                        if _rdp_n_incl < 5:
+                        if _rdp_n_fit < 5:
                             _rdp_conf_label  = "⚠️ Low confidence"
                             _rdp_conf_detail = "— log more runs for accurate predictions"
                             _rdp_conf_color  = "#cc8800"
-                        elif _rdp_n_incl < 15:
+                        elif _rdp_n_fit < 15:
                             _rdp_conf_label  = "🟡 Moderate confidence"
-                            _rdp_conf_detail = f"— based on {_rdp_n_incl} runs"
+                            _rdp_conf_detail = f"— based on {_rdp_n_fit} runs"
                             _rdp_conf_color  = "#ccaa00"
                         else:
                             _rdp_conf_label  = "🟢 High confidence"
-                            _rdp_conf_detail = f"— based on {_rdp_n_incl} runs"
+                            _rdp_conf_detail = f"— based on {_rdp_n_fit} runs"
                             _rdp_conf_color  = "#22aa55"
 
-                        _rp1, _rp2, _rp3 = st.columns(3)
-                        _rp1.metric("Predicted ET",   f"{_rdp_pred_et:.3f} s")
-                        _rp2.metric("Suggested Dial", f"{_rdp_dial:.3f} s", help="+0.02 s buffer to help avoid breakout")
-                        _rp3.metric(
+                        _rp1, _rp2 = st.columns(2)
+                        _rp1.metric(f"Predicted ET ({_rdp_dist_lbl})", f"{_rdp_pred_et:.3f} s")
+                        _rp2.metric(
                             "DA Used",
                             f"{_rdp_pred_da:,.0f} ft",
                             help="From your weather station" if _rdp_manual_active else "From METAR / forecast",
                         )
+                        if _rdp_miss_660 > 0:
+                            st.markdown(
+                                f"<p style='color:#888;font-size:0.82rem;margin-top:2px;'>"
+                                f"ℹ️ {_rdp_miss_660} included run(s) have no 660′ ET — "
+                                f"⅛-mile fit uses {_rdp_n_fit} of {_rdp_n_incl} included runs.</p>",
+                                unsafe_allow_html=True,
+                            )
 
                         st.markdown(
                             f"<div style='margin-top:4px;font-size:0.9rem;'>"
