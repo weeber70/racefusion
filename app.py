@@ -1384,50 +1384,6 @@ if st.session_state.get("current_page") == "upgrade":
         },
     ]
 
-    # ── À la carte add-ons (either tier) ──────────────────────────────────────
-    _is_paid_now      = _sub_tier in ("racer", "pro")
-    _cur_extra_cars   = max(0, int(st.session_state.get("car_slots", 1)) - 1)
-    _cur_extra_users  = int(st.session_state.get("crew_slots", 0))
-    _addons_ready     = bool(_STRIPE_PRICE_ADDL_CAR and _STRIPE_PRICE_ADDL_USER)
-
-    st.markdown("### ➕ Add-ons — available on any plan")
-    _ao_c1, _ao_c2 = st.columns(2)
-    _ao_cars = _ao_c1.number_input(
-        "🏎️ Additional cars — $9.99/mo each",
-        min_value=0, max_value=20, value=_cur_extra_cars, key="ao_cars",
-        help="Each add-on car unlocks another car slot in Car Profile.",
-    )
-    _ao_users = _ao_c2.number_input(
-        "👥 Additional users — $9.99/mo each",
-        min_value=0, max_value=20, value=_cur_extra_users, key="ao_users",
-        help="Crew members get their own login and work with this account's "
-             "cars and runs. Everything bills to you.",
-    )
-    if not _addons_ready:
-        st.caption("⚙️ Set STRIPE_PRICE_ADDL_CAR / STRIPE_PRICE_ADDL_USER env vars to enable add-ons.")
-    elif _is_paid_now:
-        if int(_ao_cars) != _cur_extra_cars or int(_ao_users) != _cur_extra_users:
-            if st.button("💾 Apply add-on changes", type="primary", key="ao_apply_btn"):
-                _ao_err = _update_addon_quantities(_current_user, int(_ao_cars), int(_ao_users))
-                if _ao_err:
-                    st.error(_ao_err)
-                else:
-                    # Force a fresh Stripe poll so tier + slots re-resolve.
-                    st.session_state.pop("sub_tier", None)
-                    st.session_state.pop("car_slots", None)
-                    st.session_state.pop("crew_slots", None)
-                    st.session_state["_stripe_flash"] = "success"
-                    st.rerun()
-        else:
-            st.caption(
-                f"Current: **{int(st.session_state.get('car_slots', 1))} car slot(s)**, "
-                f"**{_cur_extra_users} additional user(s)**. Change the numbers above to add or remove."
-            )
-    else:
-        st.caption("Pick your add-on quantities — they'll be included in checkout with the plan you choose below.")
-
-    st.markdown("---")
-
     _upg_cols = st.columns(2)
     for _tier, _col in zip(_tier_data, _upg_cols):
         with _col:
@@ -1497,6 +1453,50 @@ if st.session_state.get("current_page") == "upgrade":
                     else:
                         _err = st.session_state.get("_stripe_last_error", "No exception captured — check server logs.")
                         st.error(f"Stripe error: {_err}")
+
+    # ── À la carte add-ons (either tier) ──────────────────────────────────────
+    _is_paid_now      = _sub_tier in ("racer", "pro")
+    _cur_extra_cars   = max(0, int(st.session_state.get("car_slots", 1)) - 1)
+    _cur_extra_users  = int(st.session_state.get("crew_slots", 0))
+    _addons_ready     = bool(_STRIPE_PRICE_ADDL_CAR and _STRIPE_PRICE_ADDL_USER)
+
+    st.markdown("### ➕ Add-ons — available on any plan")
+    _ao_c1, _ao_c2 = st.columns(2)
+    _ao_cars = _ao_c1.number_input(
+        "🏎️ Additional cars — $9.99/mo each",
+        min_value=0, max_value=20, value=_cur_extra_cars, key="ao_cars",
+        help="Each add-on car unlocks another car slot in Car Profile.",
+    )
+    _ao_users = _ao_c2.number_input(
+        "👥 Additional users — $9.99/mo each",
+        min_value=0, max_value=20, value=_cur_extra_users, key="ao_users",
+        help="Crew members get their own login and work with this account's "
+             "cars and runs. Everything bills to you.",
+    )
+    if not _addons_ready:
+        st.caption("⚙️ Set STRIPE_PRICE_ADDL_CAR / STRIPE_PRICE_ADDL_USER env vars to enable add-ons.")
+    elif _is_paid_now:
+        if int(_ao_cars) != _cur_extra_cars or int(_ao_users) != _cur_extra_users:
+            if st.button("💾 Apply add-on changes", type="primary", key="ao_apply_btn"):
+                _ao_err = _update_addon_quantities(_current_user, int(_ao_cars), int(_ao_users))
+                if _ao_err:
+                    st.error(_ao_err)
+                else:
+                    # Force a fresh Stripe poll so tier + slots re-resolve.
+                    st.session_state.pop("sub_tier", None)
+                    st.session_state.pop("car_slots", None)
+                    st.session_state.pop("crew_slots", None)
+                    st.session_state["_stripe_flash"] = "success"
+                    st.rerun()
+        else:
+            st.caption(
+                f"Current: **{int(st.session_state.get('car_slots', 1))} car slot(s)**, "
+                f"**{_cur_extra_users} additional user(s)**. Change the numbers above to add or remove."
+            )
+    else:
+        st.caption("Pick your add-on quantities — they'll be included in checkout with the plan you choose below.")
+
+    st.markdown("---")
 
     st.markdown("---")
     if _sub_tier in ("racer", "pro"):
