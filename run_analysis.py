@@ -41,6 +41,7 @@ from charts import (
     CHANNEL_COLORS, CHANNEL_UNITS, CHANNEL_RANGES, _infer_channel_range,
 )
 from timeslip import correct_image_orientation, scan_timeslip, _normalize_slip_result, _validate_timeslip
+from channel_review import analyze_channels, filter_csv_bytes
 
 
 # ── Module-level helpers (moved from app.py) ────────────────────────────────
@@ -554,6 +555,91 @@ def show_run_analysis(
 
         st.stop()
 
+    # ═════════════════════════ CHANNEL REVIEW SCREEN ═════════════════════════
+    # Mirrors the pending_timeslip pattern: every CSV upload is intercepted
+    # here before save_run_csv. Nothing is stored until Confirm; Cancel
+    # discards the upload; non-interaction leaves the pending state in place.
+    if st.session_state.get("pending_channels"):
+        _pc = st.session_state["pending_channels"]
+        st.markdown("## 📊 Review CSV Channels")
+        st.caption(
+            f"Channels detected in the CSV for **{_pc['run_id']}**. "
+            "Unchecked channels are permanently removed from this run's stored "
+            "data (re-upload the CSV to recover them). Suspected duplicates "
+            "arrive unchecked; dead channels are flagged but kept by default."
+        )
+        try:
+            _pc_df = load_racepak_csv(_pc["bytes"])
+        except Exception as _pc_err:
+            _pc_df = None
+            st.error(f"Couldn't parse this CSV: {_pc_err}")
+            if st.button("🗑️ Discard upload", key="pc_cancel_broken"):
+                st.session_state.pop("pending_channels", None)
+                st.rerun()
+
+        if _pc_df is not None:
+            _pc_time = get_time_col(_pc_df)
+            _pc_rows = analyze_channels(_pc_df, _pc_time)
+            _pc_ndup = sum(1 for _r in _pc_rows if not _r["keep_default"])
+            _pc_ndead = sum(1 for _r in _pc_rows if "dead" in _r["badge"])
+            if _pc_ndup:
+                st.warning(
+                    f"⚠️ {_pc_ndup} suspected duplicate channel(s) detected and "
+                    "pre-unchecked — review the flagged rows before saving."
+                )
+            else:
+                st.success(
+                    "✅ No duplicate channels detected"
+                    + (f" ({_pc_ndead} dead channel(s) flagged, kept by default)"
+                       if _pc_ndead else "")
+                    + " — click Confirm to save all channels."
+                )
+            import pandas as _pd_pc
+            _pc_table = _pd_pc.DataFrame([{
+                "Keep":    _r["keep_default"],
+                "Channel": _r["name"],
+                "Samples": _r["n"],
+                "Min":     _r["min"],
+                "Max":     _r["max"],
+                "Mean":    _r["mean"],
+                "Note":    _r["badge"],
+            } for _r in _pc_rows])
+            _pc_edited = st.data_editor(
+                _pc_table,
+                key=f"pc_editor_{_pc['run_id']}",
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Channel", "Samples", "Min", "Max", "Mean", "Note"],
+                column_config={
+                    "Keep": st.column_config.CheckboxColumn("Keep", default=True),
+                },
+            )
+            st.caption(f"⏱️ Time column **{_pc_time}** is always kept.")
+
+            _pcb1, _pcb2 = st.columns(2)
+            if _pcb1.button("✅ Confirm & Save CSV", type="primary", key="pc_confirm"):
+                _pc_drop = [str(_row["Channel"])
+                            for _, _row in _pc_edited.iterrows()
+                            if not _row["Keep"]]
+                if len(_pc_drop) >= len(_pc_rows):
+                    st.error("Keep at least one channel.")
+                else:
+                    _pc_out = filter_csv_bytes(_pc["bytes"], _pc_drop)
+                    save_run_csv(_pc["run_id"], _pc_out)
+                    if _pc_drop:
+                        _pc_rec = load_run(_pc["run_id"])
+                        _pc_rec["channels_removed"] = _pc_drop
+                        save_run(_pc["run_id"], _pc_rec)
+                    st.session_state.pop("pending_channels", None)
+                    st.session_state["active_run_id"] = _pc["run_id"]
+                    st.query_params["run"] = _pc["run_id"]
+                    st.rerun()
+            if _pcb2.button("🗑️ Cancel & Discard CSV", key="pc_cancel"):
+                st.session_state.pop("pending_channels", None)
+                st.rerun()
+
+        st.stop()
+
     if st.session_state.get("active_run_id") is None:
         # ── Create New Run form ───────────────────────────────────────────────────
         # Set _was_on_new_run immediately — before rendering any widget — so that
@@ -893,13 +979,18 @@ def show_run_analysis(
 
             with st.status("Creating run…", expanded=True) as _create_status:
 
-                # ── Save CSV ──────────────────────────────────────────────────
+                # ── CSV: defer save until channel review is confirmed ─────────
+                # (pending_channels intercept, mirroring pending_timeslip —
+                # the CSV isn't stored until the user confirms the channels.)
                 if _new_csv_bytes is not None:
-                    _create_status.write("💾 Saving CSV data…")
+                    _create_status.write("📊 CSV received — review its channels on the run page…")
                     _stale_key = _get_slip_storage_key(_new_run_id)
                     if _stale_key:
                         _delete_slip_from_storage(_stale_key)
-                    save_run_csv(_new_run_id, _new_csv_bytes)
+                    st.session_state["pending_channels"] = {
+                        "run_id": _new_run_id,
+                        "bytes":  _new_csv_bytes,
+                    }
 
                 save_run(_new_run_id, _new_run_rec, car_id=_submit_car_id)
 

@@ -967,11 +967,16 @@ elif _active_csv_name and _active_csv_name.endswith(".run"):
     if _add_csv_file is not None and not st.session_state.get(_csv_saved_key):
         if st.sidebar.button("💾 Save CSV to this run", key=f"save_csv_btn_{_active_csv_name}",
                              use_container_width=True, type="primary"):
-            with st.sidebar.spinner("💾 Saving CSV…"):
-                save_run_csv(_active_csv_name, _add_csv_file.read())
-                st.session_state["active_run_id"] = _active_csv_name
-                st.query_params["run"] = _active_csv_name
-                st.session_state[_csv_saved_key] = True
+            # Defer the actual save to the channel-review screen
+            # (pending_channels intercept in Run Analysis — nothing is stored
+            # until the user confirms the detected channels).
+            st.session_state["pending_channels"] = {
+                "run_id": _active_csv_name,
+                "bytes":  _add_csv_file.read(),
+            }
+            st.session_state["active_run_id"] = _active_csv_name
+            st.query_params["run"] = _active_csv_name
+            st.session_state[_csv_saved_key] = True
             st.rerun()
     elif _add_csv_file is None:
         st.sidebar.caption("🎫 Timeslip-only — add channel data above")
