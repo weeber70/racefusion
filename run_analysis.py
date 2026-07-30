@@ -2596,11 +2596,18 @@ def show_run_analysis(
         # message are marked ephemeral so follow-up questions in the same
         # conversation read the history from Anthropic's prompt cache (~90%
         # cheaper, faster) instead of re-billing the full history every turn.
+        # 1-hour TTL: racers read the analysis, check the car, then ask — the
+        # default 5-minute cache expired between turns in real use. Write costs
+        # 2x base input (vs 1.25x for 5-min) but reads are 0.1x either way; one
+        # follow-up after a >5-min gap already pays for the premium. The TTL
+        # refreshes on every use, so active conversations stay hot.
         _ai_system_blocks = [{
             "type": "text",
             "text": _ai_system,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }]
+        # Beta header for extended TTL — harmless no-op if already GA.
+        _ai_extra_headers = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
         _ai_cache_key   = f"ai_response_{csv_name}"
         _ai_history_key = f"ai_history_{csv_name}"
@@ -2628,13 +2635,14 @@ def show_run_analysis(
                         _first_msg = {"role": "user", "content": [{
                             "type": "text",
                             "text": f"Here is the run data to analyze:\n\n{_payload}",
-                            "cache_control": {"type": "ephemeral"},
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
                         }]}
                         _msg = _client.messages.create(
                             model="claude-opus-4-8",
                             max_tokens=8192,
                             system=_ai_system_blocks,
                             messages=[_first_msg],
+                            extra_headers=_ai_extra_headers,
                         )
                         print(f"[AI Tuner] analyze usage: {_msg.usage}")
                         _response_text = _msg.content[0].text
@@ -2686,6 +2694,7 @@ def show_run_analysis(
                                 max_tokens=2048,
                                 system=_ai_system_blocks,
                                 messages=_history,
+                                extra_headers=_ai_extra_headers,
                             )
                             print(f"[AI Tuner] follow-up usage: {_fmsg.usage}")
                             _freply = _fmsg.content[0].text
