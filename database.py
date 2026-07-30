@@ -174,18 +174,127 @@ def _check_user_exists(username: str) -> bool:
         return False
 
 
+# ── Effective data user (crew membership) ─────────────────────────────────────
+def data_user() -> str:
+    """THE single resolution point for whose data is being operated on.
+
+    Crew members (rows in account_members) work with their OWNER's cars/runs/
+    config. app.py sets rf_data_user at session init; auth/session handling
+    keeps using rf_user (the actual login) everywhere.
+    """
+    return (st.session_state.get("rf_data_user")
+            or st.session_state.get("rf_user", ""))
+
+
+def get_account_owner(member_username: str) -> "str | None":
+    """Owner username if member_username is a crew member, else None."""
+    if not _sb or not member_username:
+        return None
+    try:
+        rows = _sb.table("account_members").select("owner_username") \
+                  .eq("member_username", member_username).execute().data
+        return rows[0]["owner_username"] if rows else None
+    except Exception:
+        return None  # table may not exist yet — behave as pre-feature
+
+
+def get_crew_members(owner_username: str) -> "list[dict]":
+    if not _sb or not owner_username:
+        return []
+    try:
+        return _sb.table("account_members") \
+                  .select("member_username,created_at") \
+                  .eq("owner_username", owner_username).execute().data or []
+    except Exception:
+        return []
+
+
+def add_crew_member(owner_username: str, member_username: str) -> str:
+    """Add a crew member. Returns '' on success, else a user-facing error."""
+    if not _sb:
+        return "Database unavailable."
+    member_username = (member_username or "").strip()
+    if not member_username:
+        return "Enter a username."
+    if member_username == owner_username:
+        return "That's your own account."
+    try:
+        if not _sb.table("credentials").select("username") \
+                  .eq("username", member_username).execute().data:
+            return (f"No RaceFusion account named '{member_username}' — "
+                    "they need to register first.")
+        if _sb.table("account_members").select("member_username") \
+              .eq("member_username", member_username).execute().data:
+            return f"'{member_username}' is already a crew member of an account."
+        _sb.table("account_members").insert({
+            "member_username": member_username,
+            "owner_username":  owner_username,
+        }).execute()
+        return ""
+    except Exception as _e:
+        return f"Could not add crew member: {_e}"
+
+
+def remove_crew_member(owner_username: str, member_username: str) -> bool:
+    if not _sb:
+        return False
+    try:
+        _sb.table("account_members").delete() \
+           .eq("owner_username", owner_username) \
+           .eq("member_username", member_username).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_entitlements(username: str) -> dict:
+    """{'car_slots': int, 'crew_slots': int} — defaults 1/0 pre-migration."""
+    out = {"car_slots": 1, "crew_slots": 0}
+    if not _sb or not username:
+        return out
+    try:
+        rows = _sb.table("credentials").select("car_slots,crew_slots") \
+                  .eq("username", username).execute().data
+        if rows:
+            out["car_slots"]  = int(rows[0].get("car_slots") or 1)
+            out["crew_slots"] = int(rows[0].get("crew_slots") or 0)
+    except Exception:
+        pass  # columns may not exist yet
+    return out
+
+
+def save_entitlements(username: str, car_slots: int, crew_slots: int) -> None:
+    if not _sb or not username:
+        return
+    try:
+        _sb.table("credentials").update({
+            "car_slots":  max(1, int(car_slots)),
+            "crew_slots": max(0, int(crew_slots)),
+        }).eq("username", username).execute()
+    except Exception as _e:
+        print(f"[RF-SUB] save_entitlements failed: {_e}", file=_sys_rf.stderr, flush=True)
+
+
 # ── Subscription helpers ──────────────────────────────────────────────────────
 def _get_user_subscription(username: str) -> dict:
-    """Read subscription_tier, trial_start_date, stripe_customer_id from credentials."""
+    """Read tier + trial + Stripe customer + entitlement slots from credentials."""
     if not _sb: return {}
     try:
         rows = _sb.table("credentials") \
-                  .select("subscription_tier,trial_start_date,stripe_customer_id") \
+                  .select("subscription_tier,trial_start_date,stripe_customer_id,car_slots,crew_slots") \
                   .eq("username", username).execute().data
         return rows[0] if rows else {}
-    except Exception as _e:
-        print(f"[RF-SUB] _get_user_subscription failed: {_e}", file=_sys_rf.stderr, flush=True)
-        return {}
+    except Exception:
+        # car_slots/crew_slots columns may not exist yet (pre-migration) —
+        # fall back to the original column set so nothing breaks.
+        try:
+            rows = _sb.table("credentials") \
+                      .select("subscription_tier,trial_start_date,stripe_customer_id") \
+                      .eq("username", username).execute().data
+            return rows[0] if rows else {}
+        except Exception as _e:
+            print(f"[RF-SUB] _get_user_subscription failed: {_e}", file=_sys_rf.stderr, flush=True)
+            return {}
 
 
 def _verify_login(username: str, password: str) -> bool:
@@ -224,7 +333,7 @@ def load_run(csv_name: str) -> dict:
     requested ID on the miss path.
     """
     if not _sb: return {}
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     if not username: return {}
     try:
         rows = _sb.table("runs").select("run_data").eq("username", username).eq("csv_filename", csv_name).execute().data
@@ -315,9 +424,26 @@ def get_user_cars(username: str) -> list[dict]:
 
 
 def create_car(username: str, car_name: str, default_car_number: str = "") -> str | None:
-    """Insert a new car row and return the new car_id (UUID string), or None on failure."""
+    """Insert a new car row and return the new car_id (UUID string), or None on failure.
+
+    Entitlement gate: creation is blocked when the account already has
+    car_slots cars (1 baseline + purchased add-ons). Fails open on
+    infrastructure errors so a Supabase hiccup can't lock out car creation.
+    """
     if not _sb or not username or not car_name:
         return None
+    try:
+        _cnt = len(_sb.table("cars").select("car_id")
+                   .eq("username", username).execute().data or [])
+        _slots = get_entitlements(username).get("car_slots", 1)
+        if _cnt >= _slots:
+            st.warning(
+                f"All {_slots} car slot{'s' if _slots != 1 else ''} in use — "
+                "add another car slot ($9.99/mo) on the Manage Subscription page."
+            )
+            return None
+    except Exception:
+        pass  # entitlement check unavailable — don't hard-block
     try:
         row = _sb.table("cars").insert({
             "username":            username,
@@ -400,7 +526,7 @@ def compute_run_date(record: dict) -> "str | None":
 
 def save_run(csv_name: str, record: dict, car_id: str | None = None):
     if not _sb: return
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     if not username: return
     _extra = {"car_id": car_id} if car_id else {}
     # Normalize track name to Title Case so variations like "GREAT LAKES DRAGAWAY"
@@ -435,7 +561,7 @@ def save_run(csv_name: str, record: dict, car_id: str | None = None):
 def save_run_csv(csv_name: str, data: bytes):
     """Persist RacePak CSV bytes to Supabase (stored as text in runs table)."""
     if not _sb: return
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     if not username: return
     csv_text = data.decode("utf-8", errors="replace")
     try:
@@ -451,7 +577,7 @@ def save_run_csv(csv_name: str, data: bytes):
 def load_run_csv_bytes(csv_name: str) -> bytes | None:
     """Load the raw CSV bytes for a saved run — scoped to the logged-in user."""
     if not _sb: return None
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     if not username: return None
     try:
         rows = _sb.table("runs").select("csv_content").eq("username", username).eq("csv_filename", csv_name).execute().data
@@ -498,7 +624,7 @@ def _run_label(filename: str, rec: dict) -> str:
 def list_saved_runs() -> list[dict]:
     """Return saved runs newest-first, each with label + filename + has_csv + record."""
     if not _sb: return []
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     if not username: return []
     try:
         rows = _sb.table("runs").select("csv_filename,run_data,created_at").eq("username", username).order("created_at", desc=True).execute().data
@@ -525,7 +651,7 @@ def list_saved_runs() -> list[dict]:
 def _delete_run_files(csv_filename: str):
     """Delete all data associated with a run from Supabase."""
     if not _sb: return
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     _key = _get_slip_storage_key(csv_filename)
     if _key:
         _delete_slip_from_storage(_key)
@@ -581,7 +707,7 @@ def save_file_hash(run_id: str, field: str, hash_value: str) -> None:
     """Update a run record with a file hash."""
     if not _sb or not run_id or not hash_value:
         return
-    username = st.session_state.get("rf_user", "")
+    username = data_user()
     try:
         _sb.table("runs").update({field: hash_value, "updated_at": "now()"}).eq(
             "csv_filename", run_id

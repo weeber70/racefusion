@@ -55,6 +55,29 @@ def show_car_profile(current_user: str, logo_src: "str | None" = None):
     st.session_state["cp_selected_car_idx"] = _sel_idx
     _active_car_id = _car_ids[_sel_idx]
 
+    # ── Add another car (entitlement-gated) ───────────────────────────────────
+    _cp_slots = int(st.session_state.get("car_slots", 1))
+    with st.expander(f"➕ Add another car ({len(_cars)} of {_cp_slots} car slot(s) used)"):
+        if len(_cars) >= _cp_slots:
+            st.info(
+                "All your car slots are in use. Add another car slot "
+                "($9.99/mo) from the **Manage Subscription** page to garage "
+                "another car."
+            )
+        else:
+            with st.form("add_car_form"):
+                _add_name   = st.text_input("Car name", placeholder="e.g. '41 Willys")
+                _add_carnum = st.text_input("Car number (optional)", placeholder="e.g. 327K")
+                if st.form_submit_button("➕ Add Car", type="primary"):
+                    if _add_name.strip():
+                        _add_cid = create_car(current_user, _add_name.strip(), _add_carnum.strip())
+                        if _add_cid:
+                            st.session_state["cp_selected_car_idx"] = len(_cars)
+                            st.success(f"Car '{_add_name.strip()}' added!")
+                            st.rerun()
+                    else:
+                        st.warning("Enter a car name first.")
+
     # ── Load saved build sheet ────────────────────────────────────────────────
     _bs = load_car_build_sheet(_active_car_id)
 

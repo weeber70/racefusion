@@ -28,6 +28,7 @@ from database import (
     extract_youtube_id, _delete_run_files, _delete_slip_from_storage,
     check_file_hash_duplicate, save_file_hash,
     load_channel_ranges, save_channel_range, get_effective_da,
+    data_user as _db_data_user,
     load_car_build_sheet,
 )
 from config import load_config, save_config
@@ -800,7 +801,7 @@ def show_run_analysis(
                         _cn_rows = (
                             _sb.table("runs")
                             .select("run_data")
-                            .eq("username", st.session_state.get("rf_user", ""))
+                            .eq("username", _db_data_user())
                             .eq("car_id", _cn_car_id)
                             .order("created_at", desc=True)
                             .limit(1)

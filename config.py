@@ -11,7 +11,8 @@ from database import _sb
 
 def load_config() -> dict:
     if not _sb: return {}
-    username = st.session_state.get("rf_user", "")
+    from database import data_user
+    username = data_user()
     try:
         rows = _sb.table("user_configs").select("config").eq("username", username).execute().data
         if rows:
@@ -25,7 +26,8 @@ def load_config() -> dict:
 
 def save_config(cfg: dict):
     if not _sb: return
-    username = st.session_state.get("rf_user", "")
+    from database import data_user
+    username = data_user()
     safe = {k: v for k, v in cfg.items() if k != "anthropic_api_key"}
     try:
         _sb.table("user_configs").upsert(

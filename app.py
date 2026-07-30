@@ -32,7 +32,10 @@ from database import (
     get_user_cars, create_car, save_run, save_run_csv, load_run_csv_bytes,
     _get_slip_storage_key, _delete_slip_from_storage, _run_label,
     list_saved_runs, _delete_run_files, _rdp_load_run_history,
+    get_account_owner, get_crew_members, add_crew_member, remove_crew_member,
+    save_entitlements,
 )
+from billing import resolve_subscription_items, build_addon_item_updates
 from config import load_config, save_config
 from weather import (
     geocode, lookup_track, _track_key, _TRACK_OVERRIDES,
@@ -69,8 +72,6 @@ def _has_feature(feature: str) -> bool:
     _pro_only    = {"csv_upload", "channel_charts", "ai_tuner"}
 
     # Paid tiers evaluated first — tier gates override trial flag.
-    if tier == "crew_chief":
-        return True
     if tier == "pro":
         return True
     if tier == "racer":
@@ -131,12 +132,15 @@ stripe.api_key = _get_secret("STRIPE_SECRET_KEY")
 
 _STRIPE_PRICE_RACER      = _get_secret("STRIPE_PRICE_RACER")
 _STRIPE_PRICE_PRO        = _get_secret("STRIPE_PRICE_PRO")
-_STRIPE_PRICE_CREW_CHIEF = _get_secret("STRIPE_PRICE_CREW_CHIEF")
+# À la carte add-ons — quantity-based line items on the base subscription.
+_STRIPE_PRICE_ADDL_CAR   = _get_secret("STRIPE_PRICE_ADDL_CAR")
+_STRIPE_PRICE_ADDL_USER  = _get_secret("STRIPE_PRICE_ADDL_USER")
 _STRIPE_PUB_KEY          = _get_secret("STRIPE_PUBLISHABLE_KEY")
+# Crew Chief tier retired 2026-07 (zero subscribers confirmed) — replaced by
+# Racer/Pro + add-ons. Archive its Product/Price in the Stripe dashboard.
 _STRIPE_TIER_MAP: dict[str, str] = {
-    _STRIPE_PRICE_RACER:      "racer",
-    _STRIPE_PRICE_PRO:        "pro",
-    _STRIPE_PRICE_CREW_CHIEF: "crew_chief",
+    _STRIPE_PRICE_RACER: "racer",
+    _STRIPE_PRICE_PRO:   "pro",
 }
 # Remove empty-string key so missing env vars don't match every price_id
 _STRIPE_TIER_MAP = {k: v for k, v in _STRIPE_TIER_MAP.items() if k}
@@ -149,14 +153,15 @@ from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
 # ── Subscription helpers (Stripe — stays in app.py) ──────────────────────────
 
-def _get_tier_from_price_id(price_id: str) -> str:
-    return _STRIPE_TIER_MAP.get(price_id, "racer")
+def _get_tier_from_price_id(price_id: str) -> "str | None":
+    # No default: an unknown price must NOT silently become a tier.
+    return _STRIPE_TIER_MAP.get(price_id)
 
 def _check_stripe_subscription(email: str, username: str) -> str | None:
     """
     Poll Stripe for an active subscription.
     Prefers the stored stripe_customer_id; falls back to email lookup.
-    Returns tier name ('racer'|'pro'|'crew_chief') if active, else None.
+    Returns tier name ('racer'|'pro') if active, else None.
     Side-effects: updates credentials table with stripe_customer_id and tier.
     """
     print(f"[RF-STRIPE] _check_stripe_subscription called: username={username!r} email={email!r}",
@@ -203,11 +208,26 @@ def _check_stripe_subscription(email: str, username: str) -> str | None:
         if not subs.data:
             return None
 
-        price_id = subs.data[0].items.data[0].price.id
-        tier = _get_tier_from_price_id(price_id)
-        print(f"[RF-STRIPE] price_id={price_id!r} → tier={tier!r}", file=_sys_rf.stderr, flush=True)
+        # Scan ALL line items (never just the first): tier comes from the
+        # base-tier price item, entitlement slots from the add-on items,
+        # unknown prices are ignored — no more silent "racer" default.
+        _sub_items = subs.data[0]["items"]["data"]
+        tier, _res_car_slots, _res_crew_slots = resolve_subscription_items(
+            _sub_items, _STRIPE_TIER_MAP,
+            _STRIPE_PRICE_ADDL_CAR, _STRIPE_PRICE_ADDL_USER,
+        )
+        print(f"[RF-STRIPE] {len(_sub_items)} item(s) → tier={tier!r} "
+              f"car_slots={_res_car_slots} crew_slots={_res_crew_slots}",
+              file=_sys_rf.stderr, flush=True)
+        if tier is None:
+            # Subscription has no recognizable base-tier item — treat as
+            # unsubscribed rather than guessing a tier.
+            return None
 
-        # 4. Persist customer ID and tier back to Supabase.
+        # 4. Persist customer ID, tier, and entitlement slots back to Supabase.
+        save_entitlements(username, _res_car_slots, _res_crew_slots)
+        st.session_state["car_slots"]  = _res_car_slots
+        st.session_state["crew_slots"] = _res_crew_slots
         if _sb:
             try:
                 _sb.table("credentials").update({
@@ -241,7 +261,8 @@ def _is_trial_active(trial_start_date) -> bool:
         return True  # parse failure → be permissive
 
 def _create_stripe_checkout(price_id: str, session_token: str,
-                             username: str = "", email: str = "") -> str | None:
+                             username: str = "", email: str = "",
+                             extra_line_items: "list[dict] | None" = None) -> str | None:
     """Create a Stripe Checkout Session and return the redirect URL.
 
     Reuses an existing Stripe customer when stripe_customer_id is stored in
@@ -251,6 +272,7 @@ def _create_stripe_checkout(price_id: str, session_token: str,
         return None
     try:
         # Look up existing Stripe customer ID so we don't create duplicates.
+        # (extra_line_items: add-on prices+quantities appended at checkout.)
         _existing_cust_id: str | None = None
         if _sb and username:
             try:
@@ -264,7 +286,8 @@ def _create_stripe_checkout(price_id: str, session_token: str,
         base = _get_secret("APP_BASE_URL", "http://localhost:8501").rstrip("/")
         _sess_params: dict = {
             "payment_method_types": ["card"],
-            "line_items": [{"price": price_id, "quantity": 1}],
+            "line_items": ([{"price": price_id, "quantity": 1}]
+                           + list(extra_line_items or [])),
             "mode": "subscription",
             "success_url": f"{base}/?session={session_token}&p=upgrade&success=true&cs_id={{CHECKOUT_SESSION_ID}}",
             "cancel_url":  f"{base}/?p=upgrade",
@@ -280,6 +303,46 @@ def _create_stripe_checkout(price_id: str, session_token: str,
         print(f"[RF-STRIPE] checkout session creation failed: {_e}", file=_sys_rf.stderr, flush=True)
         st.session_state["_stripe_last_error"] = str(_e)
         return None
+
+
+def _update_addon_quantities(username: str, extra_cars: int, extra_users: int) -> str:
+    """Set add-on line-item quantities on the user's ACTIVE subscription.
+
+    One subscription, multiple line items — Stripe prorates automatically
+    (proration_behavior='create_prorations'). Returns '' on success, else a
+    user-facing error message. Base-tier items are never touched.
+    """
+    if not _stripe_mod:
+        return "Stripe not configured."
+    try:
+        _cust_id = None
+        if _sb:
+            _rows = _sb.table("credentials").select("stripe_customer_id") \
+                       .eq("username", username).execute().data
+            _cust_id = (_rows[0].get("stripe_customer_id") or None) if _rows else None
+        if not _cust_id:
+            return "No Stripe customer on file — subscribe to a plan first."
+        _subs = _stripe_mod.Subscription.list(customer=_cust_id, status="active", limit=5)
+        if not _subs.data:
+            return "No active subscription found."
+        _sub = _subs.data[0]
+        _want: dict = {}
+        if _STRIPE_PRICE_ADDL_CAR:
+            _want[_STRIPE_PRICE_ADDL_CAR] = max(0, int(extra_cars))
+        if _STRIPE_PRICE_ADDL_USER:
+            _want[_STRIPE_PRICE_ADDL_USER] = max(0, int(extra_users))
+        _updates = build_addon_item_updates(_sub["items"]["data"], _want)
+        if _updates:
+            _stripe_mod.Subscription.modify(
+                _sub.id, items=_updates,
+                proration_behavior="create_prorations",
+            )
+            print(f"[RF-STRIPE] add-on update for {username!r}: {_updates}",
+                  file=_sys_rf.stderr, flush=True)
+        return ""
+    except Exception as _e:
+        print(f"[RF-STRIPE] add-on update failed: {_e}", file=_sys_rf.stderr, flush=True)
+        return f"Stripe update failed: {_e}"
 
 # ── Auth gate — must resolve before any other UI ──────────────────────────────
 if "rf_user" not in st.session_state:
@@ -473,14 +536,27 @@ if st.session_state["rf_user"] is None:
     st.stop()   # block rest of app until logged in
 
 # ── Logged in ─────────────────────────────────────────────────────────────────
-_current_user: str = st.session_state["rf_user"]
+_login_user: str = st.session_state["rf_user"]
+
+# ── Effective data user — THE crew-membership resolution point ────────────────
+# Crew members operate on their OWNER's garage: every data query (runs, cars,
+# configs) uses _current_user = owner, while auth/sessions stay on _login_user.
+# database.data_user() reads rf_data_user for the module-level query paths.
+if "rf_data_user" not in st.session_state:
+    _cm_owner = get_account_owner(_login_user)
+    st.session_state["rf_data_user"]   = _cm_owner or _login_user
+    st.session_state["is_crew_member"] = _cm_owner is not None
+
+_current_user: str = st.session_state["rf_data_user"]
+_is_crew_member: bool = bool(st.session_state.get("is_crew_member"))
 
 # ── Session heartbeat — update last_seen without touching session_token ───────
 # Use UPDATE (not upsert) so we never accidentally NULL out session_token/expires_at
+# NOTE: keyed on the LOGIN user — sessions are per-login, not per-garage.
 if _sb:
     try:
         _sb.table("sessions").update({"last_seen": "now()"}) \
-           .eq("username", _current_user).execute()
+           .eq("username", _login_user).execute()
     except Exception as _sess_err:
         print(f"[RF-DEBUG] sessions last_seen update FAILED: {_sess_err}", file=_sys_rf.stderr, flush=True)
 
@@ -568,6 +644,8 @@ if _sb and _current_user and not st.session_state.get("_email_backfill_done"):
 # Clear cached state if returning from Stripe Checkout success
 if "stripe_success" in st.query_params:
     st.session_state.pop("sub_tier", None)
+    st.session_state.pop("car_slots", None)
+    st.session_state.pop("crew_slots", None)
     st.query_params.pop("stripe_success", None)
 
 if "sub_tier" not in st.session_state:
@@ -575,7 +653,7 @@ if "sub_tier" not in st.session_state:
     _trial_start  = _sub_rec.get("trial_start_date")
     _stored_tier  = _sub_rec.get("subscription_tier", "trial")
     # Poll Stripe for fresh status (only if not already on a paid tier)
-    if _stored_tier not in ("racer", "pro", "crew_chief"):
+    if _stored_tier not in ("racer", "pro"):
         _user_email = cfg.get("email", "")
         if _sb:
             try:
@@ -589,14 +667,18 @@ if "sub_tier" not in st.session_state:
         if _stripe_tier:
             _stored_tier = _stripe_tier
     st.session_state["sub_tier"]       = _stored_tier
+    # Entitlement slots: cached in credentials (like the tier). A Stripe poll
+    # above may have set fresher values in session state — don't clobber them.
+    st.session_state.setdefault("car_slots",  int(_sub_rec.get("car_slots") or 1))
+    st.session_state.setdefault("crew_slots", int(_sub_rec.get("crew_slots") or 0))
     st.session_state["trial_active"]   = _is_trial_active(_trial_start)
     st.session_state["access_granted"] = (
         st.session_state["trial_active"]
-        or _stored_tier in ("racer", "pro", "crew_chief")
+        or _stored_tier in ("racer", "pro")
     )
     st.session_state["charts_granted"] = (
         st.session_state["trial_active"]
-        or _stored_tier in ("pro", "crew_chief")
+        or _stored_tier in ("pro",)
     )
 
 _sub_tier       = st.session_state.get("sub_tier", "trial")
@@ -761,7 +843,9 @@ st.sidebar.caption("Run Data Dashboard")
 
 # ── User badge + logout ───────────────────────────────────────────────────────
 _ub_col1, _ub_col2 = st.sidebar.columns([3, 2])
-_ub_col1.markdown(f"👤 **{_current_user}**")
+_ub_col1.markdown(f"👤 **{_login_user}**")
+if _is_crew_member:
+    _ub_col1.caption(f"🔧 Crew of **{_current_user}**'s garage")
 if _ub_col2.button("Log Out", key="logout_btn"):
     _delete_session_token(st.session_state.pop("session_token", None) or "")
     st.query_params.pop("session", None)
@@ -1165,7 +1249,7 @@ if st.session_state.get("current_page") == "upgrade":
 
     # ── Proactive Stripe check on every upgrade page load for trial users ─────
     # Catches missed redirects (browser closed, Streamlit restart, etc.).
-    if _sub_tier not in ("racer", "pro", "crew_chief") and _sb:
+    if _sub_tier not in ("racer", "pro") and _sb:
         try:
             _pro_cred = _sb.table("credentials").select("email, stripe_customer_id") \
                             .eq("username", _current_user).execute().data
@@ -1177,7 +1261,7 @@ if st.session_state.get("current_page") == "upgrade":
             st.session_state["sub_tier"]        = _live_tier
             st.session_state["trial_active"]    = False
             st.session_state["access_granted"]  = True
-            st.session_state["charts_granted"]  = _live_tier in ("pro", "crew_chief")
+            st.session_state["charts_granted"]  = _live_tier in ("pro",)
             _sub_tier = _live_tier
             st.rerun()
 
@@ -1208,7 +1292,7 @@ if st.session_state.get("current_page") == "upgrade":
                 st.session_state["sub_tier"]        = _new_tier
                 st.session_state["trial_active"]    = False
                 st.session_state["access_granted"]  = True
-                st.session_state["charts_granted"]  = _new_tier in ("pro", "crew_chief")
+                st.session_state["charts_granted"]  = _new_tier in ("pro",)
                 _sub_tier = _new_tier
                 st.session_state["_stripe_flash"] = "success"
             else:
@@ -1237,8 +1321,8 @@ if st.session_state.get("current_page") == "upgrade":
             f"<p style='color:#22aa55;'>✅ Your trial is active — <strong>{_days_left} day(s)</strong> remaining.</p>",
             unsafe_allow_html=True,
         )
-    elif _sub_tier in ("racer", "pro", "crew_chief"):
-        _tier_prices = {"racer": "9.99", "pro": "19.99", "crew_chief": "34.99"}
+    elif _sub_tier in ("racer", "pro"):
+        _tier_prices = {"racer": "9.99", "pro": "19.99"}
         _tier_label  = _sub_tier.replace("_", " ").title()
         _tier_price  = _tier_prices.get(_sub_tier, "?")
         st.success(f"✅ You're subscribed to **{_tier_label}** — ${_tier_price}/month")
@@ -1256,6 +1340,19 @@ if st.session_state.get("current_page") == "upgrade":
 
     st.markdown("---")
 
+    # ── Crew members don't manage billing — it's the owner's subscription ─────
+    if _is_crew_member:
+        st.info(
+            f"👥 You're a crew member on **{_current_user}**'s account. "
+            "Billing, plans, and add-ons are managed by the account owner."
+        )
+        if st.button("← Back to Run Analysis", key="crew_upgrade_back_btn"):
+            st.session_state["current_page"] = "dashboard"
+            st.query_params["p"] = "dashboard"
+            st.rerun()
+        st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
+        st.stop()
+
     _tier_data = [
         {
             "key":      "racer",
@@ -1263,6 +1360,7 @@ if st.session_state.get("current_page") == "upgrade":
             "price":    "$9.99/month",
             "price_id": _STRIPE_PRICE_RACER,
             "features": [
+                ("✅", "1 car, 1 user included"),
                 ("✅", "Unlimited timeslips"),
                 ("✅", "ET Predictor"),
                 ("✅", "Weather / DA tracking"),
@@ -1277,28 +1375,60 @@ if st.session_state.get("current_page") == "upgrade":
             "price_id": _STRIPE_PRICE_PRO,
             "features": [
                 ("✅", "Everything in Racer"),
-                ("✅", "1 car"),
+                ("✅", "1 car, 1 user included"),
                 ("✅", "Interactive Channel Charts"),
                 ("✅", "Channel Peaks & alerts"),
                 ("✅", "Custom channel overlays"),
                 ("✅", "AI Virtual Tuner"),
             ],
         },
-        {
-            "key":      "crew_chief",
-            "label":    "🧠 Crew Chief",
-            "price":    "$34.99/month",
-            "price_id": _STRIPE_PRICE_CREW_CHIEF,
-            "features": [
-                ("✅", "Everything in Pro"),
-                ("✅", "AI Virtual Tuner"),
-                ("🔜", "Unlimited cars (coming soon)"),
-                ("🔜", "Team logins — up to 3 users (coming soon)"),
-            ],
-        },
     ]
 
-    _upg_cols = st.columns(3)
+    # ── À la carte add-ons (either tier) ──────────────────────────────────────
+    _is_paid_now      = _sub_tier in ("racer", "pro")
+    _cur_extra_cars   = max(0, int(st.session_state.get("car_slots", 1)) - 1)
+    _cur_extra_users  = int(st.session_state.get("crew_slots", 0))
+    _addons_ready     = bool(_STRIPE_PRICE_ADDL_CAR and _STRIPE_PRICE_ADDL_USER)
+
+    st.markdown("### ➕ Add-ons — available on any plan")
+    _ao_c1, _ao_c2 = st.columns(2)
+    _ao_cars = _ao_c1.number_input(
+        "🏎️ Additional cars — $9.99/mo each",
+        min_value=0, max_value=20, value=_cur_extra_cars, key="ao_cars",
+        help="Each add-on car unlocks another car slot in Car Profile.",
+    )
+    _ao_users = _ao_c2.number_input(
+        "👥 Additional users — $9.99/mo each",
+        min_value=0, max_value=20, value=_cur_extra_users, key="ao_users",
+        help="Crew members get their own login and work with this account's "
+             "cars and runs. Everything bills to you.",
+    )
+    if not _addons_ready:
+        st.caption("⚙️ Set STRIPE_PRICE_ADDL_CAR / STRIPE_PRICE_ADDL_USER env vars to enable add-ons.")
+    elif _is_paid_now:
+        if int(_ao_cars) != _cur_extra_cars or int(_ao_users) != _cur_extra_users:
+            if st.button("💾 Apply add-on changes", type="primary", key="ao_apply_btn"):
+                _ao_err = _update_addon_quantities(_current_user, int(_ao_cars), int(_ao_users))
+                if _ao_err:
+                    st.error(_ao_err)
+                else:
+                    # Force a fresh Stripe poll so tier + slots re-resolve.
+                    st.session_state.pop("sub_tier", None)
+                    st.session_state.pop("car_slots", None)
+                    st.session_state.pop("crew_slots", None)
+                    st.session_state["_stripe_flash"] = "success"
+                    st.rerun()
+        else:
+            st.caption(
+                f"Current: **{int(st.session_state.get('car_slots', 1))} car slot(s)**, "
+                f"**{_cur_extra_users} additional user(s)**. Change the numbers above to add or remove."
+            )
+    else:
+        st.caption("Pick your add-on quantities — they'll be included in checkout with the plan you choose below.")
+
+    st.markdown("---")
+
+    _upg_cols = st.columns(2)
     for _tier, _col in zip(_tier_data, _upg_cols):
         with _col:
             _is_current   = _sub_tier == _tier["key"]
@@ -1332,7 +1462,7 @@ if st.session_state.get("current_page") == "upgrade":
             )
             st.markdown(_card_html, unsafe_allow_html=True)
 
-            _is_paid_subscriber = _sub_tier in ("racer", "pro", "crew_chief")
+            _is_paid_subscriber = _sub_tier in ("racer", "pro")
             if _is_paid_subscriber:
                 pass  # "← Current plan" badge already shown inside the card HTML above
                 # No subscribe buttons for paid subscribers — manage via Stripe portal
@@ -1345,9 +1475,18 @@ if st.session_state.get("current_page") == "upgrade":
                     type="primary",
                     use_container_width=True,
                 ):
+                    # Include any selected add-ons as extra line items.
+                    _co_extra = []
+                    if _STRIPE_PRICE_ADDL_CAR and int(st.session_state.get("ao_cars", 0)) > 0:
+                        _co_extra.append({"price": _STRIPE_PRICE_ADDL_CAR,
+                                          "quantity": int(st.session_state["ao_cars"])})
+                    if _STRIPE_PRICE_ADDL_USER and int(st.session_state.get("ao_users", 0)) > 0:
+                        _co_extra.append({"price": _STRIPE_PRICE_ADDL_USER,
+                                          "quantity": int(st.session_state["ao_users"])})
                     _checkout_url = _create_stripe_checkout(
                         _tier["price_id"], _sess_tok,
                         username=_current_user, email=cfg.get("email", ""),
+                        extra_line_items=_co_extra,
                     )
                     if _checkout_url:
                         st.markdown(
@@ -1360,7 +1499,7 @@ if st.session_state.get("current_page") == "upgrade":
                         st.error(f"Stripe error: {_err}")
 
     st.markdown("---")
-    if _sub_tier in ("racer", "pro", "crew_chief"):
+    if _sub_tier in ("racer", "pro"):
         if st.button("⚙️ Manage Subscription", key="manage_sub_btn"):
             _portal_cust_id = None
             if _sb:
@@ -1387,6 +1526,43 @@ if st.session_state.get("current_page") == "upgrade":
                     st.info("Redirecting to Stripe customer portal…")
                 except Exception as _portal_e:
                     st.error(f"Could not open portal: {_portal_e}")
+
+    # ── Crew member management (owners only) ──────────────────────────────────
+    _crew_slots_n = int(st.session_state.get("crew_slots", 0))
+    _crew_rows    = get_crew_members(_current_user)
+    if _crew_slots_n or _crew_rows:
+        st.markdown("### 👥 Crew Members")
+        st.caption(
+            f"{len(_crew_rows)} of {_crew_slots_n} crew slot(s) used. Crew "
+            "members log in with their own RaceFusion account and see this "
+            "account's cars and runs."
+        )
+        if len(_crew_rows) > _crew_slots_n:
+            st.warning(
+                f"⚠️ You have {len(_crew_rows)} crew member(s) but only "
+                f"{_crew_slots_n} paid slot(s) — remove members or add user slots."
+            )
+        for _cm in _crew_rows:
+            _cm_c1, _cm_c2 = st.columns([4, 1])
+            _cm_c1.write(f"👤 {_cm['member_username']}")
+            if _cm_c2.button("Remove", key=f"cm_rm_{_cm['member_username']}"):
+                remove_crew_member(_current_user, _cm["member_username"])
+                st.rerun()
+        if len(_crew_rows) < _crew_slots_n:
+            _cm_a1, _cm_a2 = st.columns([4, 1])
+            _cm_new = _cm_a1.text_input(
+                "Add crew member", key="cm_add_input",
+                label_visibility="collapsed",
+                placeholder="Their RaceFusion username (they must register first)",
+            )
+            if _cm_a2.button("Add", key="cm_add_btn", type="primary"):
+                _cm_err = add_crew_member(_current_user, _cm_new)
+                if _cm_err:
+                    st.error(_cm_err)
+                else:
+                    st.success(f"'{_cm_new.strip()}' added to your crew.")
+                    st.rerun()
+
     st.caption("All plans billed monthly. Cancel anytime. Secure payments via Stripe.")
 
     if st.button("← Back to Run Analysis", key="upgrade_back_btn"):
