@@ -2131,33 +2131,62 @@ def show_run_analysis(
                             for _, r in _df_s[[_time_col_ai, _c]].dropna().iterrows()
                         ]
 
-            # ── Previous runs: timeslip, weather, channel stats, changelog ────────────
-            # Build in chronological order (oldest first) so Run 1 = oldest
+            # ── Previous runs: two-tier history ──────────────────────────────────────
+            # Tier 1 (full detail, current format): the 15 most recent runs plus
+            # up to 10 additional runs at the current run's track (canonical
+            # match) outside that recency window — the runs actually likely to
+            # be cited in comparisons.
+            # Tier 2 (one-line summary, ~60 tokens/run): everything older —
+            # keeps trend awareness without the token cost.
+            # CSVs are fetched ONLY for Tier 1 runs (the click-latency fix).
+            # Build in chronological order (oldest first) so Run 1 = oldest.
             _other_runs = [s for s in reversed(allsaved_runs) if s["filename"] != csv_name]
-            prev_runs = []
+
+            # Stable chronological labels across BOTH tiers, so all_time_records
+            # can cite any run in history regardless of which tier it landed in.
+            _lbl_by_fn = {}
             for _run_idx, saved in enumerate(_other_runs, start=1):
-                if saved["filename"] == csv_name:
-                    continue
+                _l_date = ((saved["record"].get("timeslip") or {}).get("date") or "")
+                _lbl_by_fn[saved["filename"]] = (
+                    f"Run {_run_idx}" + (f" ({_l_date})" if _l_date else "")
+                )
+
+            _aliases_ai = car_cfg.get("track_aliases", {}) or {}
+
+            def _canon_ai(rec_slip):
+                _t = (rec_slip.get("track_name")
+                      or rec_slip.get("track_location") or "").strip()
+                return canonical_track(_t, _aliases_ai)[1] if _t else ""
+
+            _cur_track_c = _canon_ai(slip)
+
+            # allsaved_runs is newest-first (server-side run_date DESC), so the
+            # 15 most recent non-current runs are the tail of _other_runs.
+            _recent_fns = {s["filename"] for s in _other_runs[-15:]}
+            _same_track_fns = set()
+            if _cur_track_c:
+                for saved in reversed(_other_runs):  # newest → oldest
+                    if saved["filename"] in _recent_fns:
+                        continue
+                    if _canon_ai(saved["record"].get("timeslip") or {}) == _cur_track_c:
+                        _same_track_fns.add(saved["filename"])
+                        if len(_same_track_fns) >= 10:
+                            break
+            _full_fns = _recent_fns | _same_track_fns
+
+            # Session-scoped channel-stats cache — saved runs' CSVs are
+            # immutable, so repeat Analyze clicks in the same session skip the
+            # Supabase refetch entirely (no schema change needed).
+            _ch_cache = st.session_state.setdefault("_ai_ch_stats_cache", {})
+
+            prev_runs = []
+            older_runs_summary = []
+            for saved in _other_runs:
                 rec  = saved["record"]
                 s    = rec.get("timeslip", {})
                 p_wx = rec.get("weather", {})
                 p_rd = rec.get("run_details", {})
-                # Load that run's CSV for channel stats if available
-                p_ch = {}
-                _p_csv_bytes = load_run_csv_bytes(saved["filename"])
-                if _p_csv_bytes:
-                    try:
-                        _p_df = load_racepak_csv(_p_csv_bytes)
-                        for ch in _p_df.columns:
-                            _s = _p_df[ch].dropna()
-                            if len(_s) > 5 and _s.std() > 0.001:
-                                p_ch[ch] = {
-                                    "min":  round(float(_s.min()), 3),
-                                    "max":  round(float(_s.max()), 3),
-                                    "mean": round(float(_s.mean()), 3),
-                                }
-                    except Exception:
-                        pass
+                _run_label = _lbl_by_fn[saved["filename"]]
                 # DA: prefer timeslip value, then stored weather value, then compute from raw wx
                 _p_da = (s.get("density_alt_ft") or
                          p_wx.get("density_alt_ft") or
@@ -2165,12 +2194,47 @@ def show_run_analysis(
                                                p_wx.get("pressure_hpa")))
                 if _p_da is not None:
                     _p_da = round(_p_da)
-                _run_date = s.get("date", "") or ""
-                _run_label = f"Run {_run_idx}" + (f" ({_run_date})" if _run_date else "")
+
+                # ── Tier 2: one-line summary, NO CSV fetch ────────────────────
+                if saved["filename"] not in _full_fns:
+                    _cl = rec.get("changelog", []) or []
+                    _cl_line = "; ".join(str(_c) for _c in _cl)[:120] if _cl else ""
+                    older_runs_summary.append({
+                        "label":    _run_label,
+                        "date":     s.get("date") or "",
+                        "track":    s.get("track_name", "") or s.get("track_location", ""),
+                        "da_ft":    _p_da,
+                        "reaction": s.get("reaction_time"),
+                        "ft_60":    s.get("ft_60"),
+                        "et_1320":  s.get("ft_1320"),
+                        "mph_1320": s.get("mph_1320"),
+                        "changes":  _cl_line,
+                    })
+                    continue
+
+                # ── Tier 1: full detail (existing format) ─────────────────────
+                p_ch = _ch_cache.get(saved["filename"])
+                if p_ch is None:
+                    p_ch = {}
+                    _p_csv_bytes = load_run_csv_bytes(saved["filename"])
+                    if _p_csv_bytes:
+                        try:
+                            _p_df = load_racepak_csv(_p_csv_bytes)
+                            for ch in _p_df.columns:
+                                _s = _p_df[ch].dropna()
+                                if len(_s) > 5 and _s.std() > 0.001:
+                                    p_ch[ch] = {
+                                        "min":  round(float(_s.min()), 3),
+                                        "max":  round(float(_s.max()), 3),
+                                        "mean": round(float(_s.mean()), 3),
+                                    }
+                        except Exception:
+                            pass
+                    _ch_cache[saved["filename"]] = p_ch
                 prev_runs.append({
                     "label":         _run_label,
                     "filename":      saved["filename"],
-                    "date":          _run_date,
+                    "date":          s.get("date") or "",
                     "track":         s.get("track_name", "") or s.get("track_location", ""),
                     "timeslip": {
                         "reaction":  s.get("reaction_time"),
@@ -2201,7 +2265,9 @@ def show_run_analysis(
             # run list, same timeslip fields (ft_60 / ft_1320 / mph_1320), same
             # min/max aggregation over floats — the two can never disagree.
             # Includes the run being analyzed, like the card does.
-            _rec_label_by_fn = {p["filename"]: p["label"] for p in prev_runs}
+            # Labels for ALL runs in history (both tiers) — records must be able
+            # to cite a run even if it only appears as a one-line summary.
+            _rec_label_by_fn = dict(_lbl_by_fn)
             _rec_label_by_fn[csv_name] = "the run being analyzed"
 
             _rec_all_entries = []
@@ -2367,7 +2433,17 @@ def show_run_analysis(
                     "notes":         rd.get("notes", ""),
                 },
                 "all_time_records": all_time_records,
+                "history_note": (
+                    f"previous_runs holds FULL detail for the {len(prev_runs)} most "
+                    f"relevant runs (the 15 most recent, plus up to 10 more at the "
+                    f"current run's track). older_runs_summary lists the remaining "
+                    f"{len(older_runs_summary)} runs in one-line form for trend "
+                    "context. all_time_records is computed over the COMPLETE "
+                    "history regardless of this split — always quote it for any "
+                    "record/best claim."
+                ),
                 "previous_runs": prev_runs,
+                "older_runs_summary": older_runs_summary,
             }
             return _json.dumps(payload, indent=2, default=str)
 
@@ -2516,6 +2592,16 @@ def show_run_analysis(
         "#3 EGT averaged 180°F below the pack" not "one cylinder ran cold."
         """
 
+        # Prompt-caching breakpoints: the system prompt and the big payload
+        # message are marked ephemeral so follow-up questions in the same
+        # conversation read the history from Anthropic's prompt cache (~90%
+        # cheaper, faster) instead of re-billing the full history every turn.
+        _ai_system_blocks = [{
+            "type": "text",
+            "text": _ai_system,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
         _ai_cache_key   = f"ai_response_{csv_name}"
         _ai_history_key = f"ai_history_{csv_name}"
 
@@ -2537,13 +2623,20 @@ def show_run_analysis(
                         import anthropic as _anthropic
                         _client = _anthropic.Anthropic(api_key=api_key)
                         _payload = _build_ai_payload(csv_name, run, df, available_channels, saved_runs, cfg)
-                        _first_msg = {"role": "user", "content": f"Here is the run data to analyze:\n\n{_payload}"}
+                        # cache_control on the payload block = the whole prefix
+                        # (system + payload) is cached for follow-up turns.
+                        _first_msg = {"role": "user", "content": [{
+                            "type": "text",
+                            "text": f"Here is the run data to analyze:\n\n{_payload}",
+                            "cache_control": {"type": "ephemeral"},
+                        }]}
                         _msg = _client.messages.create(
                             model="claude-opus-4-8",
                             max_tokens=8192,
-                            system=_ai_system,
+                            system=_ai_system_blocks,
                             messages=[_first_msg],
                         )
+                        print(f"[AI Tuner] analyze usage: {_msg.usage}")
                         _response_text = _msg.content[0].text
                         st.session_state[_ai_cache_key] = _response_text
                         # Reset conversation history to just this exchange
@@ -2591,9 +2684,10 @@ def show_run_analysis(
                             _fmsg = _client.messages.create(
                                 model="claude-opus-4-8",
                                 max_tokens=2048,
-                                system=_ai_system,
+                                system=_ai_system_blocks,
                                 messages=_history,
                             )
+                            print(f"[AI Tuner] follow-up usage: {_fmsg.usage}")
                             _freply = _fmsg.content[0].text
                             _history.append({"role": "assistant", "content": _freply})
                             st.session_state[_ai_history_key] = _history
