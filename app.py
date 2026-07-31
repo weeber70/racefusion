@@ -1494,7 +1494,7 @@ if st.session_state.get("current_page") == "upgrade":
                 f"**{_cur_extra_users} additional user(s)**. Change the numbers above to add or remove."
             )
     else:
-        st.caption("Pick your add-on quantities — they'll be included in checkout with the plan you choose below.")
+        st.caption("Pick your add-on quantities — they'll be included in checkout with the plan you choose above.")
 
     st.markdown("---")
 
