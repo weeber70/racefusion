@@ -271,15 +271,19 @@ def _create_stripe_checkout(price_id: str, session_token: str,
     if not _stripe_mod or not price_id:
         return None
     try:
-        # Look up existing Stripe customer ID so we don't create duplicates.
+        # Look up existing Stripe customer ID so we don't create duplicates,
+        # and the REGISTERED email (credentials, not the user_configs blob)
+        # for the checkout prefill.
         # (extra_line_items: add-on prices+quantities appended at checkout.)
         _existing_cust_id: str | None = None
+        _cred_email: str = ""
         if _sb and username:
             try:
-                _cred_rows = _sb.table("credentials").select("stripe_customer_id") \
+                _cred_rows = _sb.table("credentials").select("stripe_customer_id,email") \
                                .eq("username", username).execute().data
                 if _cred_rows:
                     _existing_cust_id = _cred_rows[0].get("stripe_customer_id") or None
+                    _cred_email       = _cred_rows[0].get("email") or ""
             except Exception:
                 pass
 
@@ -292,10 +296,15 @@ def _create_stripe_checkout(price_id: str, session_token: str,
             "success_url": f"{base}/?session={session_token}&p=upgrade&success=true&cs_id={{CHECKOUT_SESSION_ID}}",
             "cancel_url":  f"{base}/?p=upgrade",
         }
+        # Permanently stamp the owning account onto the session — the success
+        # handler links by this, and it makes dashboard reconciliation trivial.
+        if username:
+            _sess_params["client_reference_id"] = username
         if _existing_cust_id:
             _sess_params["customer"] = _existing_cust_id
-        elif email:
-            _sess_params["customer_email"] = email
+        elif _cred_email or email:
+            # Registered email preferred; cfg email only as fallback.
+            _sess_params["customer_email"] = _cred_email or email
 
         checkout = _stripe_mod.checkout.Session.create(**_sess_params)
         return checkout.url
@@ -1276,8 +1285,36 @@ if st.session_state.get("current_page") == "upgrade":
             # Stale bookmark or manually crafted URL — ignore silently.
             pass
         else:
-            # Valid Stripe checkout session ID — poll Stripe to confirm.
-            # Fetch email from credentials so it's accurate even if cfg is stale.
+            # ── DETERMINISTIC LINK: retrieve the Checkout Session itself ──────
+            # The session tells us exactly which Stripe customer this account
+            # just became — no email join required (first-time subscribers'
+            # checkout email routinely differs from their registered email).
+            if _stripe_mod and _stripe_mod.api_key:
+                try:
+                    _cs_sess = _stripe_mod.checkout.Session.retrieve(_cs_id)
+                    _cs_cust   = getattr(_cs_sess, "customer", None)
+                    _cs_ref    = getattr(_cs_sess, "client_reference_id", None)
+                    _cs_paid   = getattr(_cs_sess, "payment_status", "") in ("paid", "no_payment_required")
+                    _cs_done   = getattr(_cs_sess, "status", "") == "complete"
+                    if _cs_ref and _cs_ref != _login_user:
+                        # Session belongs to a different account — never link it.
+                        print(f"[RF-STRIPE] cs_id ref mismatch: session ref={_cs_ref!r} "
+                              f"login={_login_user!r} — refusing to link",
+                              file=_sys_rf.stderr, flush=True)
+                    elif _cs_cust and (_cs_paid or _cs_done):
+                        if _sb:
+                            _sb.table("credentials").update(
+                                {"stripe_customer_id": _cs_cust}
+                            ).eq("username", _current_user).execute()
+                        print(f"[RF-STRIPE] linked {_current_user!r} → {_cs_cust} "
+                              f"via checkout session {_cs_id[:20]}…",
+                              file=_sys_rf.stderr, flush=True)
+                except Exception as _cs_e:
+                    print(f"[RF-STRIPE] checkout session retrieve failed: {_cs_e}",
+                          file=_sys_rf.stderr, flush=True)
+
+            # Resolve tier/slots — now finds the freshly-stored customer ID
+            # first; email lookup remains only as a last-resort fallback.
             _pay_email = cfg.get("email", "")
             if _sb:
                 try:
