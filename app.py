@@ -917,6 +917,34 @@ car_number_input = cfg.get("car_number", "")
 # snapshot / build sheet. 0 = not set (never assume a placeholder weight).
 weight_input = int(cfg.get("car_weight_lbs", 0) or 0)
 
+# ── Active car (multi-car accounts only) ──────────────────────────────────────
+# Global car scope: when the account has 2+ cars, everything downstream (run
+# list, Run Manager, Season Summary, Predictor, Comparison, AI records) shows
+# only the active car's runs. Single-car accounts: no selector, no filter —
+# queries are byte-identical to before.
+_ac_cars = get_user_cars(_current_user)
+if len(_ac_cars) >= 2:
+    _ac_ids   = [c["car_id"] for c in _ac_cars]
+    _ac_names = [c["car_name"] for c in _ac_cars]
+    _ac_saved = st.session_state.get("active_car_id")
+    _ac_idx   = _ac_ids.index(_ac_saved) if _ac_saved in _ac_ids else 0
+    _ac_sel   = st.sidebar.selectbox(
+        "🏎️ Car", options=list(range(len(_ac_ids))),
+        format_func=lambda i: _ac_names[i],
+        index=_ac_idx, key="active_car_selectbox",
+    )
+    if st.session_state.get("active_car_id") not in (None, _ac_ids[_ac_sel]):
+        # Car switched — the previously open run and any comparison picks
+        # belong to the other car.
+        st.session_state["active_car_id"] = _ac_ids[_ac_sel]
+        st.session_state.pop("active_run_id", None)
+        st.session_state.pop("compare_run_ids", None)
+        st.query_params.pop("run", None)
+        st.rerun()
+    st.session_state["active_car_id"] = _ac_ids[_ac_sel]
+else:
+    st.session_state.pop("active_car_id", None)
+
 # ── Run selector ───────────────────────────────────────────────────────────────
 _saved_runs = list_saved_runs()
 # Inject newly created run into selector if Supabase hasn't returned it yet

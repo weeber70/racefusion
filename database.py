@@ -627,7 +627,15 @@ def list_saved_runs() -> list[dict]:
     username = data_user()
     if not username: return []
     try:
-        rows = _sb.table("runs").select("csv_filename,run_data,created_at").eq("username", username).order("created_at", desc=True).execute().data
+        _q = _sb.table("runs").select("csv_filename,run_data,created_at,car_id") \
+                .eq("username", username)
+        # Active-car scope: the session key is only ever set for accounts with
+        # 2+ cars (app.py sidebar selector). Single-car accounts skip this —
+        # identical query to before.
+        _ac = st.session_state.get("active_car_id")
+        if _ac:
+            _q = _q.eq("car_id", _ac)
+        rows = _q.order("created_at", desc=True).execute().data
         try:
             _has_csv_set = {r["csv_filename"] for r in
                 _sb.table("runs").select("csv_filename").eq("username", username).not_.is_("csv_content", "null").execute().data}
@@ -794,7 +802,13 @@ def _rdp_load_run_history(username: str) -> list[dict]:
     if not _sb:
         return []
     try:
-        rows = _sb.table("runs").select("id,csv_filename,run_data,created_at").eq("username", username).execute().data
+        _q = _sb.table("runs").select("id,csv_filename,run_data,created_at,car_id") \
+                .eq("username", username)
+        # Same active-car scope as list_saved_runs (set only for 2+-car accounts)
+        _ac = st.session_state.get("active_car_id")
+        if _ac:
+            _q = _q.eq("car_id", _ac)
+        rows = _q.execute().data
     except Exception:
         return []
     results = []
