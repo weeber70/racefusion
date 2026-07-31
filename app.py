@@ -1309,7 +1309,15 @@ if st.session_state.get("current_page") == "upgrade":
             "Please refresh in a moment."
         )
 
-    if _trial_active:
+    # Paid subscription ALWAYS wins over the trial clock: once someone has a
+    # real tier, the trial-days-remaining banner must never appear, no matter
+    # what trial_start_date says.
+    if _sub_tier in ("racer", "pro"):
+        _tier_prices = {"racer": "9.99", "pro": "19.99"}
+        _tier_label  = _sub_tier.replace("_", " ").title()
+        _tier_price  = _tier_prices.get(_sub_tier, "?")
+        st.success(f"✅ You're subscribed to **{_tier_label}** — ${_tier_price}/month")
+    elif _trial_active:
         _upg_sub_rec   = _get_user_subscription(_current_user)
         _upg_ts_str    = _upg_sub_rec.get("trial_start_date") or ""
         _upg_ts        = (
@@ -1321,11 +1329,6 @@ if st.session_state.get("current_page") == "upgrade":
             f"<p style='color:#22aa55;'>✅ Your trial is active — <strong>{_days_left} day(s)</strong> remaining.</p>",
             unsafe_allow_html=True,
         )
-    elif _sub_tier in ("racer", "pro"):
-        _tier_prices = {"racer": "9.99", "pro": "19.99"}
-        _tier_label  = _sub_tier.replace("_", " ").title()
-        _tier_price  = _tier_prices.get(_sub_tier, "?")
-        st.success(f"✅ You're subscribed to **{_tier_label}** — ${_tier_price}/month")
     else:
         st.markdown(
             "<p style='color:#cc1111;font-weight:600;'>⚠️ Your trial has expired. Choose a plan to continue.</p>",
