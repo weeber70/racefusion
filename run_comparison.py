@@ -310,34 +310,55 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
             if _r in _pk_ids
         ][:2]
 
+    # Custom picker (no st.multiselect): the search box and the results are
+    # ONE surface — matches render directly below as you type, click ➕ to add.
+    # Also removes the multiselect's built-in "Select all", which made no
+    # sense with a 2-run cap. cmp_picker is plain session state here (not a
+    # widget key), so add/remove buttons can mutate it freely.
+    _pk_sel = st.session_state["cmp_picker"]
+
     _pk_query  = st.text_input(
-        "🔍 Filter runs", key="cmp_picker_filter",
-        placeholder="Filter by date, ET, track, or MPH — e.g. 6.89 or 2026-07-25",
+        "🔍 Search runs", key="cmp_picker_filter",
+        placeholder="Type a date, ET, track, or MPH — matching runs appear below",
     )
     _pk_tokens = [_t for _t in (_pk_query or "").lower().split() if _t]
     if _pk_tokens:
         _pk_opts = [_rid for _rid in _pk_ids
                     if all(_t in _pk_hay.get(_rid, "") for _t in _pk_tokens)]
     else:
-        _pk_opts = list(_pk_ids)
-    # Current selections must always remain valid options for the widget.
-    _pk_opts = [_rid for _rid in _pk_ids
-                if _rid in set(_pk_opts) or _rid in set(st.session_state["cmp_picker"])]
+        _pk_opts = list(_pk_ids)  # newest first
 
-    _pk_sel = st.multiselect(
-        "Pick 2 runs to compare",
-        options=_pk_opts,
-        format_func=lambda _rid: _pk_labels.get(_rid, _rid),
-        max_selections=2,
-        key="cmp_picker",
-    )
-    if list(_pk_sel) != list(st.session_state.get("compare_run_ids", [])):
-        st.session_state["compare_run_ids"] = list(_pk_sel)
+    # ── Selected runs (chips with remove) ─────────────────────────────────
+    if _pk_sel:
+        st.caption(f"**Selected {len(_pk_sel)} of 2:**")
+        for _rid in list(_pk_sel):
+            _pkc1, _pkc2 = st.columns([8, 1])
+            _pkc1.markdown(f"✅ **{_pk_labels.get(_rid, _rid)}**")
+            if _pkc2.button("✖", key=f"cmp_rm_{_rid}", help="Remove from comparison"):
+                _pk_sel.remove(_rid)
+                st.session_state["compare_run_ids"] = list(_pk_sel)
+                st.rerun()
 
+    # ── Live results — click ➕ to add ────────────────────────────────────
+    if len(_pk_sel) < 2:
+        _pk_matches = [_rid for _rid in _pk_opts if _rid not in _pk_sel][:8]
+        if _pk_matches:
+            st.caption("Matching runs — click ➕ to add:" if _pk_tokens
+                       else "Recent runs — click ➕ to add, or search above:")
+            for _rid in _pk_matches:
+                _pka1, _pka2 = st.columns([8, 1])
+                _pka1.write(_pk_labels.get(_rid, _rid))
+                if _pka2.button("➕", key=f"cmp_add_{_rid}", help="Add to comparison"):
+                    _pk_sel.append(_rid)
+                    st.session_state["compare_run_ids"] = list(_pk_sel)
+                    st.rerun()
+        elif _pk_tokens:
+            st.caption("No runs match that search.")
+
+    st.session_state["compare_run_ids"] = list(_pk_sel)
     run_ids = st.session_state.get("compare_run_ids", [])
     if len(run_ids) < 2:
-        st.info("Pick 2 runs above to compare — use the filter box to search "
-                "by date, ET, track, or MPH.")
+        st.info("Pick 2 runs above to compare.")
         return
 
     # ── Load run records ──────────────────────────────────────────────────────
