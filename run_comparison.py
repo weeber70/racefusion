@@ -728,7 +728,10 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
     # ═══════════════════════════════════════════════════════════════════════════
     # SECTION 5 — CHANNEL PEAKS
     # ═══════════════════════════════════════════════════════════════════════════
-    if _has_csv:
+    # Pro-gated with the overlay charts ("Channel Peaks & alerts" is a listed
+    # Pro feature) — when locked, this section vanishes and the single lock
+    # card in SECTION 6 speaks for both.
+    if _has_csv and _hf("channel_charts"):
         st.subheader("Channel Peaks")
 
         _peak_defs = [
