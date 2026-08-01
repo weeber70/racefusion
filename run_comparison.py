@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 
 from database import (
     load_run, load_run_csv_bytes, get_user_cars, load_channel_ranges, _get_secret,
-    get_effective_da,
+    get_effective_da, list_saved_runs,
 )
 from run_analysis import load_racepak_csv, get_time_col
 from config import load_config
@@ -277,21 +277,60 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
     with _cmp_title_col:
         st.markdown("## ⚖️ Run Comparison")
     with _cmp_back_col:
-        if st.button("← Back to Run Manager", key="cmp_back_btn", use_container_width=True):
-            # Uncheck every run that was being compared
-            for _fid in st.session_state.get("compare_run_ids", []):
-                st.session_state.pop(f"rm_chk_{_fid}", None)
-            st.session_state["compare_run_ids"] = []
-            st.session_state["compare_run_ids_pending"] = []
-            st.session_state["rm_selected"] = set()
-            st.session_state["current_page"] = "run_manager"
-            st.query_params["p"] = "run_manager"
-            st.rerun()
+        # Provenance-aware: the back button (and its Run Manager checkbox
+        # cleanup) only exists when the user actually arrived via Run
+        # Manager's "Compare Selected". Nav/Run-Analysis entries get no back
+        # button — the sidebar nav covers navigation.
+        if st.session_state.get("cmp_from_run_manager"):
+            if st.button("← Back to Run Manager", key="cmp_back_btn", use_container_width=True):
+                # Uncheck every run that was being compared
+                for _fid in st.session_state.get("compare_run_ids", []):
+                    st.session_state.pop(f"rm_chk_{_fid}", None)
+                st.session_state["compare_run_ids"] = []
+                st.session_state["compare_run_ids_pending"] = []
+                st.session_state["rm_selected"] = set()
+                st.session_state.pop("cmp_from_run_manager", None)
+                st.session_state.pop("cmp_picker", None)
+                st.session_state["current_page"] = "run_manager"
+                st.query_params["p"] = "run_manager"
+                st.rerun()
     st.markdown("---")
 
+    # ── Run picker ────────────────────────────────────────────────────────────
+    # Built-in, searchable (selectbox typeahead), active-car-scoped via
+    # list_saved_runs(). Pre-filled from compare_run_ids when arriving via Run
+    # Manager's Compare Selected or Run Analysis's "Compare with another run";
+    # otherwise starts empty and drives the selection itself.
+    _pk_runs   = list_saved_runs()
+    _pk_ids    = [r["filename"] for r in _pk_runs]
+    _pk_labels = {r["filename"]: r["label"] for r in _pk_runs}
+
+    if "cmp_picker" in st.session_state:
+        # Sanitize: drop ids not in the current (car-scoped) option list so a
+        # car switch or deleted run can never crash the widget.
+        st.session_state["cmp_picker"] = [
+            _r for _r in st.session_state["cmp_picker"] if _r in _pk_ids
+        ]
+    else:
+        st.session_state["cmp_picker"] = [
+            _r for _r in st.session_state.get("compare_run_ids", [])
+            if _r in _pk_ids
+        ]
+
+    _pk_sel = st.multiselect(
+        "Pick 2–3 runs to compare (type to search)",
+        options=_pk_ids,
+        format_func=lambda _rid: _pk_labels.get(_rid, _rid),
+        max_selections=3,
+        key="cmp_picker",
+    )
+    if list(_pk_sel) != list(st.session_state.get("compare_run_ids", [])):
+        st.session_state["compare_run_ids"] = list(_pk_sel)
+
     run_ids = st.session_state.get("compare_run_ids", [])
-    if not run_ids or len(run_ids) < 2:
-        st.warning("Select 2–3 runs in Run Manager to compare.")
+    if len(run_ids) < 2:
+        st.info("Pick at least 2 runs above to compare — or select them in "
+                "Run Manager and hit **⚖️ Compare Selected**.")
         return
 
     # ── Load run records ──────────────────────────────────────────────────────

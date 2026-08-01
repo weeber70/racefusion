@@ -97,6 +97,11 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
             st.session_state["compare_run_ids"] = list(
                 st.session_state.get("compare_run_ids_pending", [])
             )
+            # Provenance flag: comparison's back button + checkbox cleanup
+            # only apply when arriving from here. Reset the picker widget so
+            # it re-seeds from this fresh selection.
+            st.session_state["cmp_from_run_manager"] = True
+            st.session_state.pop("cmp_picker", None)
             st.session_state["current_page"] = "run_comparison"
             st.query_params["p"] = "run_comparison"
             st.rerun()

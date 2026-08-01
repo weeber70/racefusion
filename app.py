@@ -381,7 +381,8 @@ if st.session_state["rf_user"] is None:
             st.session_state["session_token"] = _sess_param
             # Restore current_page from URL if present
             _p_param = st.query_params.get("p", "")
-            if _p_param in ("dashboard", "predictor", "season", "upgrade", "instructions"):
+            if _p_param in ("dashboard", "predictor", "season", "upgrade", "instructions",
+                            "run_comparison", "car_profile"):
                 st.session_state["current_page"] = _p_param
             print(f"[RF-AUTH] ✅ session restored as {_restored_user!r}  page={_p_param!r}", file=_sys_rf.stderr, flush=True)
         else:
@@ -586,7 +587,7 @@ for _k, _v in {
         # Restore current_page from URL on refresh
         if _k == "current_page":
             _pg_param = st.query_params.get("p", "")
-            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season", "upgrade", "run_manager", "instructions") else _v
+            st.session_state[_k] = _pg_param if _pg_param in ("dashboard", "predictor", "season", "upgrade", "run_manager", "instructions", "run_comparison", "car_profile") else _v
         else:
             st.session_state[_k] = _v
 
@@ -903,6 +904,11 @@ if _cur_page != "predictor":
         st.session_state["current_page"] = "predictor"
         st.query_params["p"] = "predictor"
         st.rerun()
+if _cur_page != "run_comparison":
+    if st.sidebar.button("⚖️ Run Comparison", use_container_width=True, key="nav_to_run_comparison"):
+        st.session_state["current_page"] = "run_comparison"
+        st.query_params["p"] = "run_comparison"
+        st.rerun()
 if _cur_page != "season":
     if st.sidebar.button("📅 Season Summary", use_container_width=True, key="nav_to_season"):
         st.session_state["current_page"] = "season"
@@ -945,6 +951,7 @@ if len(_ac_cars) >= 2:
         st.session_state["active_car_id"] = _ac_ids[_ac_sel]
         st.session_state.pop("active_run_id", None)
         st.session_state.pop("compare_run_ids", None)
+        st.session_state.pop("cmp_picker", None)
         st.query_params.pop("run", None)
         st.rerun()
     st.session_state["active_car_id"] = _ac_ids[_ac_sel]
