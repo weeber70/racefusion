@@ -22,10 +22,11 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
     st.markdown("# 🗂️ Run Manager")
 
     # ── Init session state ─────────────────────────────────────────────────────
+    # NOTE: the row checkboxes are the DELETE-selection mechanism (the per-event
+    # 🗑 deletes checked runs). The compare flow moved to the dedicated Run
+    # Comparison page (2026-07) — no compare affordances live here anymore.
     if "rm_selected" not in st.session_state:
         st.session_state["rm_selected"] = set()
-    if "compare_run_ids_pending" not in st.session_state:
-        st.session_state["compare_run_ids_pending"] = []
 
     # ── Fetch all runs for this user (includes event_name column) ─────────────
     _rm_rows: list[dict] = []
@@ -59,53 +60,13 @@ def show_run_manager(saved_runs: list, current_user: str, access_granted: bool, 
 
     _rm_all_ids = [r["filename"] for r in _rm_run_list]
 
-    # ── Search + Compare button row ────────────────────────────────────────────
-    # Rebuild pending list from actual checkbox widget state each render —
-    # never from rm_selected, which can carry stale IDs across sessions.
-    _rm_pending = [
-        k[len("rm_chk_"):]
-        for k, v in st.session_state.items()
-        if k.startswith("rm_chk_") and v is True
-    ]
-    st.session_state["compare_run_ids_pending"] = _rm_pending
-    _rm_n_sel = len(_rm_pending)
-    _rm_can_compare = (_rm_n_sel == 2)
-
-    if _rm_n_sel == 0:
-        _rm_cmp_caption = "Select 2 runs to compare"
-    elif _rm_n_sel == 1:
-        _rm_cmp_caption = "Select 1 more run"
-    elif _rm_n_sel == 2:
-        _rm_cmp_caption = "Ready to compare"
-    else:
-        _rm_cmp_caption = f"Too many selected (max 2)"
-
-    _rm_top_c1, _rm_top_c2 = st.columns([3, 1])
-    with _rm_top_c1:
-        _rm_search_raw = st.text_input(
-            "🔍 Search", placeholder="Filter by track, date, or event name…",
-            key="rm_search_input", label_visibility="collapsed",
-        )
-    with _rm_top_c2:
-        if st.button(
-            "⚖️ Compare Selected",
-            key="rm_compare_btn",
-            type="primary",
-            disabled=not _rm_can_compare,
-            use_container_width=True,
-        ):
-            st.session_state["compare_run_ids"] = list(
-                st.session_state.get("compare_run_ids_pending", [])
-            )
-            # Provenance flag: comparison's back button + checkbox cleanup
-            # only apply when arriving from here. Reset the picker widget so
-            # it re-seeds from this fresh selection.
-            st.session_state["cmp_from_run_manager"] = True
-            st.session_state.pop("cmp_picker", None)
-            st.session_state["current_page"] = "run_comparison"
-            st.query_params["p"] = "run_comparison"
-            st.rerun()
-        st.caption(_rm_cmp_caption)
+    # ── Search row ──────────────────────────────────────────────────────────
+    _rm_search_raw = st.text_input(
+        "🔍 Search", placeholder="Filter by track, date, or event name…",
+        key="rm_search_input", label_visibility="collapsed",
+    )
+    st.caption("☑️ Checkboxes select runs for deletion (🗑). To compare runs, "
+               "use **⚖️ Run Comparison** in the sidebar.")
 
     _rm_search = (_rm_search_raw or "").strip().lower()
 

@@ -1645,7 +1645,6 @@ def show_run_analysis(
     if st.button("⚖️ Compare with another run", key="cmp_with_other_btn"):
         st.session_state["compare_run_ids"] = [csv_name]
         st.session_state.pop("cmp_picker", None)          # re-seed picker
-        st.session_state.pop("cmp_from_run_manager", None)  # not a RM entry
         st.session_state["current_page"] = "run_comparison"
         st.query_params["p"] = "run_comparison"
         st.rerun()

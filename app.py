@@ -906,6 +906,12 @@ if _cur_page != "predictor":
         st.rerun()
 if _cur_page != "run_comparison":
     if st.sidebar.button("⚖️ Run Comparison", use_container_width=True, key="nav_to_run_comparison"):
+        # If a run is open and no comparison is in progress, pre-fill it as
+        # Run 1 so the user only has to pick the second run.
+        _nav_open_run = st.session_state.get("active_run_id")
+        if _nav_open_run and not st.session_state.get("compare_run_ids"):
+            st.session_state["compare_run_ids"] = [_nav_open_run]
+            st.session_state.pop("cmp_picker", None)  # re-seed picker
         st.session_state["current_page"] = "run_comparison"
         st.query_params["p"] = "run_comparison"
         st.rerun()

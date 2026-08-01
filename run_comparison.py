@@ -273,55 +273,62 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
             unsafe_allow_html=True,
         )
 
-    _cmp_title_col, _cmp_back_col = st.columns([4, 1], vertical_alignment="center")
-    with _cmp_title_col:
-        st.markdown("## ⚖️ Run Comparison")
-    with _cmp_back_col:
-        # Provenance-aware: the back button (and its Run Manager checkbox
-        # cleanup) only exists when the user actually arrived via Run
-        # Manager's "Compare Selected". Nav/Run-Analysis entries get no back
-        # button — the sidebar nav covers navigation.
-        if st.session_state.get("cmp_from_run_manager"):
-            if st.button("← Back to Run Manager", key="cmp_back_btn", use_container_width=True):
-                # Uncheck every run that was being compared
-                for _fid in st.session_state.get("compare_run_ids", []):
-                    st.session_state.pop(f"rm_chk_{_fid}", None)
-                st.session_state["compare_run_ids"] = []
-                st.session_state["compare_run_ids_pending"] = []
-                st.session_state["rm_selected"] = set()
-                st.session_state.pop("cmp_from_run_manager", None)
-                st.session_state.pop("cmp_picker", None)
-                st.session_state["current_page"] = "run_manager"
-                st.query_params["p"] = "run_manager"
-                st.rerun()
+    st.markdown("## ⚖️ Run Comparison")
     st.markdown("---")
 
     # ── Run picker ────────────────────────────────────────────────────────────
-    # Built-in, searchable (selectbox typeahead), active-car-scoped via
-    # list_saved_runs(). Pre-filled from compare_run_ids when arriving via Run
-    # Manager's Compare Selected or Run Analysis's "Compare with another run";
-    # otherwise starts empty and drives the selection itself.
+    # Active-car-scoped via list_saved_runs(). Pre-filled from compare_run_ids
+    # (open run via nav button, or Run Analysis's "Compare with another run");
+    # otherwise starts empty. Capped at 2 runs — the best/worst color coding
+    # and overlay charts are built for head-to-head comparison.
     _pk_runs   = list_saved_runs()
     _pk_ids    = [r["filename"] for r in _pk_runs]
     _pk_labels = {r["filename"]: r["label"] for r in _pk_runs}
 
+    # Plain-substring search haystack per run (date, ET, track, MPH) — the
+    # filter box below replaces the widget's blind fuzzy matching, where
+    # "6.89" matched "7.348s · 190.43 mph" via scattered subsequence hits.
+    _pk_hay = {}
+    for _pr in _pk_runs:
+        _pr_slip = (_pr.get("record") or {}).get("timeslip") or {}
+        _pk_hay[_pr["filename"]] = " ".join([
+            str(_pr_slip.get("date") or ""),
+            str(_pr_slip.get("ft_1320") or ""),
+            str(_pr_slip.get("track_name") or _pr_slip.get("track_location") or ""),
+            str(_pr_slip.get("mph_1320") or ""),
+        ]).lower()
+
     if "cmp_picker" in st.session_state:
-        # Sanitize: drop ids not in the current (car-scoped) option list so a
+        # Sanitize: drop ids not in the current (car-scoped) run list so a
         # car switch or deleted run can never crash the widget.
         st.session_state["cmp_picker"] = [
             _r for _r in st.session_state["cmp_picker"] if _r in _pk_ids
-        ]
+        ][:2]
     else:
         st.session_state["cmp_picker"] = [
             _r for _r in st.session_state.get("compare_run_ids", [])
             if _r in _pk_ids
-        ]
+        ][:2]
+
+    _pk_query  = st.text_input(
+        "🔍 Filter runs", key="cmp_picker_filter",
+        placeholder="Filter by date, ET, track, or MPH — e.g. 6.89 or 2026-07-25",
+    )
+    _pk_tokens = [_t for _t in (_pk_query or "").lower().split() if _t]
+    if _pk_tokens:
+        _pk_opts = [_rid for _rid in _pk_ids
+                    if all(_t in _pk_hay.get(_rid, "") for _t in _pk_tokens)]
+    else:
+        _pk_opts = list(_pk_ids)
+    # Current selections must always remain valid options for the widget.
+    _pk_opts = [_rid for _rid in _pk_ids
+                if _rid in set(_pk_opts) or _rid in set(st.session_state["cmp_picker"])]
 
     _pk_sel = st.multiselect(
-        "Pick 2–3 runs to compare (type to search)",
-        options=_pk_ids,
+        "Pick 2 runs to compare",
+        options=_pk_opts,
         format_func=lambda _rid: _pk_labels.get(_rid, _rid),
-        max_selections=3,
+        max_selections=2,
         key="cmp_picker",
     )
     if list(_pk_sel) != list(st.session_state.get("compare_run_ids", [])):
@@ -329,8 +336,8 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
 
     run_ids = st.session_state.get("compare_run_ids", [])
     if len(run_ids) < 2:
-        st.info("Pick at least 2 runs above to compare — or select them in "
-                "Run Manager and hit **⚖️ Compare Selected**.")
+        st.info("Pick 2 runs above to compare — use the filter box to search "
+                "by date, ET, track, or MPH.")
         return
 
     # ── Load run records ──────────────────────────────────────────────────────
