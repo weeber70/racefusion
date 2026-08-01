@@ -283,7 +283,12 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
     # and overlay charts are built for head-to-head comparison.
     _pk_runs   = list_saved_runs()
     _pk_ids    = [r["filename"] for r in _pk_runs]
-    _pk_labels = {r["filename"]: r["label"] for r in _pk_runs}
+    # Show CSV presence in the picker — a run without channel data compares
+    # fine on timeslip/weather tables but can't appear in the overlay charts.
+    _pk_labels = {
+        r["filename"]: r["label"] + ("" if r.get("has_csv") else "  · 🚫 no channel CSV")
+        for r in _pk_runs
+    }
 
     # Plain-substring search haystack per run (date, ET, track, MPH) — the
     # filter box below replaces the widget's blind fuzzy matching, where
@@ -400,7 +405,9 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
                 df = load_racepak_csv(csv_bytes)
                 tc = get_time_col(df)
                 _run_dfs.append((lbl, df, tc))
-            except Exception:
+            except Exception as _cmp_parse_err:
+                # Parse failure ≠ missing CSV — make it visible in server logs
+                print(f"[CMP] CSV parse FAILED for {rid}: {_cmp_parse_err}")
                 _run_dfs.append((lbl, None, None))
         else:
             _run_dfs.append((lbl, None, None))
@@ -855,6 +862,18 @@ def show_run_comparison(username: str, logo_src: "str | None" = None,
             st.rerun()
     elif _has_csv:
         st.subheader("Overlaid Charts")
+
+        # Never silently drop a run from the charts: if a selected run has no
+        # loadable channel CSV, say so explicitly instead of quietly plotting
+        # only the other run.
+        _cmp_no_csv = [_l for _l, _d, _ in _run_dfs if _d is None]
+        if _cmp_no_csv:
+            st.warning(
+                "⚠️ No channel data for "
+                + ", ".join(f"**{_l}**" for _l in _cmp_no_csv)
+                + " — the charts below show only the run(s) with a stored CSV. "
+                "(Timeslip/weather tables above still compare both runs.)"
+            )
 
         # Load user's channel visibility + group-override prefs from Run Analysis
         _cfg      = load_config()
