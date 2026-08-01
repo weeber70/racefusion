@@ -2162,7 +2162,9 @@ def show_run_analysis(
         # ── AI Virtual Tuner ──────────────────────────────────────────────────────────
         st.markdown("## 🤖 AI Virtual Tuner")
         if not has_feature("ai_tuner"):
-            st.info("🤖 AI Virtual Tuner available on Pro.")
+            # Racer+ now includes the AI Tuner (timeslip-only payload) — this
+            # gate only fires for expired trials with no subscription.
+            st.info("🤖 AI Virtual Tuner requires an active subscription.")
             if st.button("⬆️ Upgrade to Pro", key="ai_tuner_upgrade_btn"):
                 _sv = st.query_params.get("session", "")
                 st.query_params.clear()
@@ -2182,8 +2184,14 @@ def show_run_analysis(
             st.stop()
 
         def _build_ai_payload(csv_name: str, run_rec: dict, df, available_channels: list,
-                              allsaved_runs: list, car_cfg: dict) -> str:
+                              allsaved_runs: list, car_cfg: dict,
+                              include_channels: bool = True) -> str:
             import json as _json
+
+            # Tier split: Racer gets timeslip/weather/history-only analysis;
+            # Pro (and active trials) additionally get CSV/channel data.
+            if not include_channels:
+                df = None  # kills ch_stats + key_traces below
 
             slip = run_rec.get("timeslip", {})
             wx   = run_rec.get("weather", {})
@@ -2305,7 +2313,10 @@ def show_run_analysis(
                     continue
 
                 # ── Tier 1: full detail (existing format) ─────────────────────
-                p_ch = _ch_cache.get(saved["filename"])
+                if not include_channels:
+                    p_ch = {}          # Racer: no channel stats, no CSV fetch
+                else:
+                    p_ch = _ch_cache.get(saved["filename"])
                 if p_ch is None:
                     p_ch = {}
                     _p_csv_bytes = load_run_csv_bytes(saved["filename"])
@@ -2537,6 +2548,13 @@ def show_run_analysis(
                 "previous_runs": prev_runs,
                 "older_runs_summary": older_runs_summary,
             }
+            if not include_channels:
+                payload["channel_data_access"] = (
+                    "Channel/data-logger detail is not included at this "
+                    "subscription tier — base the analysis on timeslip splits, "
+                    "weather/DA, run details, and history. Do not treat the "
+                    "absence of channel data as 'no data logger installed'."
+                )
             return _json.dumps(payload, indent=2, default=str)
 
         _ai_system = """\
@@ -2721,7 +2739,10 @@ def show_run_analysis(
                     try:
                         import anthropic as _anthropic
                         _client = _anthropic.Anthropic(api_key=api_key)
-                        _payload = _build_ai_payload(csv_name, run, df, available_channels, saved_runs, cfg)
+                        _payload = _build_ai_payload(
+                            csv_name, run, df, available_channels, saved_runs, cfg,
+                            include_channels=has_feature("ai_tuner_channels"),
+                        )
                         # cache_control on the payload block = the whole prefix
                         # (system + payload) is cached for follow-up turns.
                         _first_msg = {"role": "user", "content": [{
@@ -3409,7 +3430,7 @@ def show_run_analysis(
             border-radius:10px;background:#0a0a0a;">
             <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
             <h3 style="color:#cc1111;">Channel Charts — Pro Feature</h3>
-            <p style="color:#888;">Upgrade to Pro or Crew Chief to unlock interactive channel charts.</p>
+            <p style="color:#888;">Upgrade to Pro to unlock interactive channel charts.</p>
             </div>""",
             unsafe_allow_html=True,
         )
@@ -3417,6 +3438,25 @@ def show_run_analysis(
             st.session_state["current_page"] = "upgrade"
             st.query_params["p"] = "upgrade"
             st.rerun()
+
+        # Charts are locked, but the rest of the page is NOT: CSV export is
+        # ungated for subscribers (the data is theirs), the timeslip photo is
+        # tier-free, and the AI Tuner is Racer+ (with a timeslip-only payload
+        # — see _build_ai_payload include_channels).
+        if _active_csv_bytes and has_feature("csv_export"):
+            st.markdown("---")
+            st.download_button(
+                "⬇️ Download this run's CSV",
+                data=_active_csv_bytes,
+                file_name=csv_name if csv_name.lower().endswith(".csv") else f"{csv_name}.csv",
+                mime="text/csv",
+                key="locked_charts_csv_export",
+            )
+        if _slip_bytes is not None:
+            with st.expander("📷 Timeslip photo", expanded=False):
+                st.image(correct_image_orientation(_slip_bytes), use_container_width=True)
+        st.markdown("---")
+        _render_ai_tuner_section()
         st.markdown(
             "<div style='text-align:center;color:rgba(255,255,255,0.35);font-size:0.75rem;"
             "padding:2rem 0 1rem 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:3rem;'>"

@@ -260,7 +260,11 @@ def _cmp_legend_html(run_dfs, valid_channels, color_map):
 
 # ── Main page ─────────────────────────────────────────────────────────────────
 
-def show_run_comparison(username: str, logo_src: "str | None" = None):
+def show_run_comparison(username: str, logo_src: "str | None" = None,
+                        has_feature=None):
+    # Tier gates (mirrors Run Analysis): charts → Pro; AI comparison → Racer+
+    # with channel detail only for Pro. None (legacy caller) = allow all.
+    _hf = has_feature or (lambda _f: True)
     """Render the Run Comparison page."""
     if logo_src:
         st.markdown(
@@ -423,7 +427,10 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
     api_key = _get_secret("ANTHROPIC_API_KEY")
     _cmp_ai_cache_key = "cmp_ai_" + "_".join(rid for rid, _ in _records)
 
-    if st.button("🤖 Analyze Runs", key="cmp_ai_analyze_btn", type="primary"):
+    if not _hf("ai_tuner"):
+        # Only expired trials with no subscription land here — Racer+ has AI.
+        st.info("🤖 AI Run Comparison requires an active subscription.")
+    elif st.button("🤖 Analyze Runs", key="cmp_ai_analyze_btn", type="primary"):
         if not api_key:
             st.warning("⚠️ Add your Anthropic API key in the sidebar to use AI analysis.")
         else:
@@ -431,7 +438,17 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
                 try:
                     import anthropic as _anthropic
                     _client = _anthropic.Anthropic(api_key=api_key)
-                    _payload = _build_cmp_ai_payload(_records, _run_dfs, _col_labels)
+                    # Racer: timeslip/weather/setup only — strip channel dfs.
+                    _ai_dfs = (_run_dfs if _hf("ai_tuner_channels")
+                               else [(_l, None, None) for _l, _d, _t in _run_dfs])
+                    _payload = _build_cmp_ai_payload(_records, _ai_dfs, _col_labels)
+                    if not _hf("ai_tuner_channels"):
+                        _payload += (
+                            "\n\n(Note: channel/data-logger detail is not "
+                            "included at this subscription tier — compare on "
+                            "timeslip splits, weather, and setup. Do not treat "
+                            "missing channel data as 'no data logger'.)"
+                        )
                     _msg = _client.messages.create(
                         model="claude-opus-4-8",
                         max_tokens=8192,
@@ -445,7 +462,7 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
                 except Exception as _e:
                     st.error(f"AI analysis failed: {_e}")
 
-    if st.session_state.get(_cmp_ai_cache_key):
+    if _hf("ai_tuner") and st.session_state.get(_cmp_ai_cache_key):
         with st.container(border=True):
             st.markdown(st.session_state[_cmp_ai_cache_key])
 
@@ -752,7 +769,21 @@ def show_run_comparison(username: str, logo_src: "str | None" = None):
     # ═══════════════════════════════════════════════════════════════════════════
     # SECTION 6 — OVERLAID CHARTS
     # ═══════════════════════════════════════════════════════════════════════════
-    if _has_csv:
+    if _has_csv and not _hf("channel_charts"):
+        st.markdown(
+            """<div style="text-align:center;padding:32px 20px;border:1px solid #2a0000;
+            border-radius:10px;background:#0a0a0a;">
+            <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
+            <h3 style="color:#cc1111;">Overlaid Channel Charts — Pro Feature</h3>
+            <p style="color:#888;">Upgrade to Pro to unlock multi-run channel chart overlays.</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        if st.button("⬆️ Upgrade to Pro", key="cmp_charts_upgrade_btn", type="primary"):
+            st.session_state["current_page"] = "upgrade"
+            st.query_params["p"] = "upgrade"
+            st.rerun()
+    elif _has_csv:
         st.subheader("Overlaid Charts")
 
         # Load user's channel visibility + group-override prefs from Run Analysis

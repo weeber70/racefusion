@@ -66,10 +66,16 @@ def _has_feature(feature: str) -> bool:
 
     Paid tier always takes priority over trial status — a Racer subscriber
     is gated on Pro features even if their trial window hasn't fully expired.
+
+    Entitlement model (2026-07):
+      • csv_upload / channel_charts / ai_tuner_channels → Pro (or active trial)
+      • ai_tuner / csv_export                            → Racer+ (or active trial)
+      • expired trial, no subscription                   → NO gated features
+        (an expired trial is not Racer-equivalent)
     """
     tier         = st.session_state.get("sub_tier", "trial")
     trial_active = st.session_state.get("trial_active", False)
-    _pro_only    = {"csv_upload", "channel_charts", "ai_tuner"}
+    _pro_only    = {"csv_upload", "channel_charts", "ai_tuner_channels"}
 
     # Paid tiers evaluated first — tier gates override trial flag.
     if tier == "pro":
@@ -81,8 +87,8 @@ def _has_feature(feature: str) -> bool:
     if trial_active:
         return True  # active trial gets everything
 
-    # Expired trial — block pro-only features.
-    return feature not in _pro_only
+    # Expired trial with no subscription: locked out of ALL gated features.
+    return False
 
 # ── (styles extracted to styles.py) ──────────────────────────────────────────
 
@@ -1660,7 +1666,8 @@ if st.session_state.get("current_page") == "car_profile":
 
 # ── Run Comparison page ───────────────────────────────────────────────────────
 if st.session_state.get("current_page") == "run_comparison":
-    show_run_comparison(username=_current_user, logo_src=_LOGO_SRC)
+    show_run_comparison(username=_current_user, logo_src=_LOGO_SRC,
+                        has_feature=_has_feature)
     st.markdown(_FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
